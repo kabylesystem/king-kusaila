@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Etat de King Kusaila : missions en cours + dernier rapport.
+# Lance par le clic sur le module Waybar "KING" (kitty --hold).
+ROOT="$HOME/.king-kusaila"
+JOBS="$ROOT/jobs"
+bold() { printf '\033[1;35m%s\033[0m\n' "$1"; }
+
+bold "👑 KING KUSAILA — $(date '+%H:%M:%S')"
+echo "──────────────────────────────────────────"
+
+# Missions background en cours (claude --print vivants lances par King)
+mapfile -t live < <(pgrep -af 'claude --print' 2>/dev/null | grep 'King Kusaila' || true)
+if ((${#live[@]})); then
+  bold "🟣 En cours (${#live[@]}) :"
+  for l in "${live[@]}"; do
+    name="$(sed -n 's/.*--name King Kusaila - \([^ ]*\).*/\1/p' <<<"$l")"
+    echo "   • ${name:-?}  (pid $(awk '{print $1}' <<<"$l"))"
+  done
+else
+  echo "✅ Aucune mission en cours."
+fi
+echo
+
+# Dernier job
+job="$(ls -td "$JOBS"/*/ 2>/dev/null | head -1)"
+if [[ -n "$job" ]]; then
+  bold "📋 Dernier job :"
+  grep -m1 -- '- mission:' "$job/STATUS.md" 2>/dev/null | sed 's/- mission:/   /'
+  grep -m1 -E '^- (status|exit_code):' "$job/STATUS.md" 2>/dev/null | sed 's/^/   /'
+  if [[ -s "$job/FINAL.md" ]]; then
+    echo; bold "📝 Rapport :"; echo
+    cat "$job/FINAL.md"
+  elif [[ -s "$job/claude.log" ]]; then
+    echo; echo "   (pas encore de FINAL.md — fin du log :)"
+    tail -n 15 "$job/claude.log" 2>/dev/null | sed 's/^/   /'
+  else
+    echo "   (log vide — l'agent demarre ou ecrit sa sortie a la fin)"
+  fi
+  echo; echo "   dossier : $job"
+fi
+echo "──────────────────────────────────────────"

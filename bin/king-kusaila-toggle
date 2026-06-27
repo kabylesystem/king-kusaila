@@ -323,7 +323,10 @@ Work like a serious autonomous engineering agent:
   read the docs/source, try another approach, work around it, debug in a loop (act -> verify -> fix).
   Asking the user a question is a small failure to avoid. Only stop to ask if you are genuinely BLOCKED
   (options exhausted), the action is DESTRUCTIVE/irreversible, or the intent is truly AMBIGUOUS.
-- When finished, write FINAL.md with what changed, where, and any remaining risk.
+- When finished, write FINAL.md. Its FIRST line MUST be a one-sentence summary in
+  FRENCH starting with "Resume: " (what you did, in plain language for the user).
+  Then add the details: what changed, where, and any remaining risk. This first line
+  is shown to the user as the end-of-mission notification, so make it clear and useful.
 - In background mode, do the work without waiting for more user chat unless impossible.
 SYSTEM
 
