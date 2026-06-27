@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Mode REPONDEUR Signal de King Kusaila.
+#   king-repondeur on      -> active : repond a TOUS les entrants au style de naly,
+#                             apres un delai humain aleatoire (1-4 min par defaut).
+#   king-repondeur off     -> coupe : silence total, ne repond a personne.
+#   king-repondeur status  -> etat courant.
+# OFF par defaut. King ne repond JAMAIS sans activation explicite.
+set -euo pipefail
+
+ROOT="$HOME/.king-kusaila"
+STATE="$ROOT/repondeur.state"            # contenu: on / off
+STYLE="$ROOT/repondeur-style.md"          # profil d'ecriture de naly
+LOGF="$ROOT/repondeur.log"
+CONV="$ROOT/repondeur-conv"               # transcript par contact
+PIDF="$ROOT/repondeur.loop.pid"
+WHITELIST="$ROOT/repondeur-contacts.txt"   # 1 numero par ligne ; King ne repond QU'a ceux-la
+SIGNAL="$HOME/.local/bin/signal-cli"
+KSIGNAL="$HOME/.local/bin/king-signal"
+DMIN="${KING_REPONDEUR_MIN:-60}"          # delai min (s)
+DMAX="${KING_REPONDEUR_MAX:-180}"         # delai max (s)  -> 1 a 3 min
+mkdir -p "$CONV"
+
+account() { "$SIGNAL" listAccounts 2>/dev/null | grep -oE '\+[0-9]+' | head -1; }
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOGF"; }
+
+# Genere la reponse de naly (Claude sur credits du plan) au dernier message.
+generate_reply() {
+  local sender="$1" conv="$2" style=""
+  [[ -f "$STYLE" ]] && style="$(cat "$STYLE")"
+  claude --print --dangerously-skip-permissions --permission-mode bypassPermissions \
+    --append-system-prompt "Tu ES naly (Ylan). Tu reponds a un message Signal A SA PLACE, dans SON style exact.
+$style
+Regles: reponds au DERNIER message de l'interlocuteur. Court et naturel comme un vrai SMS de naly.
+Sors UNIQUEMENT le texte du message a envoyer, rien d'autre (pas de guillemets, pas d'explication)." \
+    "Conversation (EUX = l'interlocuteur, MOI = naly):
+$conv
+
+Ecris le prochain message de naly." < /dev/null 2>/dev/null | head -c 2000
+}
+
+# Planifie une reponse differee a $sender.
+schedule_reply() {
+  local sender="$1"
+  local d=$(( RANDOM % (DMAX - DMIN + 1) + DMIN ))
+  log "scheduled reply to $sender in ${d}s"
+  ( sleep "$d"
+    [[ -f "$STATE" && "$(cat "$STATE")" == "on" ]] || exit 0
+    local conv reply
+    conv="$(tail -n 24 "$CONV/$sender.txt" 2>/dev/null)"
+    reply="$(generate_reply "$sender" "$conv")"
+    reply="$(printf '%s' "$reply" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [[ -n "$reply" ]] || { log "empty reply for $sender, skip"; exit 0; }
+    "$KSIGNAL" "$sender" "$reply" >/dev/null 2>&1 && {
+      printf 'MOI: %s\n' "$reply" >> "$CONV/$sender.txt"; log "replied to $sender: $reply"; }
+  ) &
+}
+
+# Boucle d'ecoute (tourne en fond tant que STATE=on).
+loop() {
+  local acc; acc="$(account)"
+  [[ -n "$acc" ]] || { log "no account, abort"; exit 1; }
+  log "loop start (acc=$acc, delai ${DMIN}-${DMAX}s)"
+  while [[ -f "$STATE" && "$(cat "$STATE")" == "on" ]]; do
+    "$SIGNAL" -a "$acc" receive --output=json --timeout 5 2>/dev/null | while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local sender msg grp
+      sender="$(jq -r '.envelope.sourceNumber // .envelope.source // empty' <<<"$line" 2>/dev/null)"
+      msg="$(jq -r '.envelope.dataMessage.message // empty' <<<"$line" 2>/dev/null)"
+      grp="$(jq -r '.envelope.dataMessage.groupInfo.groupId // empty' <<<"$line" 2>/dev/null)"
+      [[ -z "$sender" || -z "$msg" ]] && continue          # pas un message texte
+      [[ -n "$grp" ]] && continue                          # on ignore les groupes
+      [[ "$sender" == "$acc" ]] && continue                # pas soi-meme
+      # WHITELIST: ne repond QU'aux contacts autorises (Leticia au debut).
+      if [[ -f "$WHITELIST" ]] && ! grep -qF "$sender" "$WHITELIST"; then
+        log "ignore (hors whitelist): $sender"; continue
+      fi
+      printf 'EUX: %s\n' "$msg" >> "$CONV/$sender.txt"
+      log "msg from $sender: $msg"
+      schedule_reply "$sender"
+    done
+    sleep 2
+  done
+  log "loop stop"
+}
+
+case "${1:-status}" in
+  __loop) loop ;;   # interne
+  on)
+    [[ -f "$STYLE" ]] || { echo "⚠️  style absent ($STYLE) — King repondrait sans ton style. Cree-le d'abord."; }
+    # purge le backlog SANS repondre (on ne repond qu'aux messages recus apres activation)
+    "$SIGNAL" -a "$(account)" receive --timeout 3 >/dev/null 2>&1 || true
+    echo on > "$STATE"
+    if [[ -f "$PIDF" ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then :; else
+      setsid -f bash "$0" __loop >/dev/null 2>&1
+      sleep 0.3; pgrep -f "$0 __loop" | head -1 > "$PIDF" 2>/dev/null || true
+    fi
+    "$HOME/.local/bin/king-voice-status" king "REPONDEUR ON" 2>/dev/null || true
+    notify-send "King Kusaila" "🟢 Répondeur Signal ACTIVÉ (délai $((DMIN/60))-$((DMAX/60)) min)" 2>/dev/null || true
+    pkill -RTMIN+9 waybar 2>/dev/null || true
+    echo "🟢 répondeur ON"
+    ;;
+  off)
+    echo off > "$STATE"
+    [[ -f "$PIDF" ]] && { kill "$(cat "$PIDF")" 2>/dev/null || true; rm -f "$PIDF"; }
+    "$HOME/.local/bin/king-voice-status" idle 2>/dev/null || true
+    notify-send "King Kusaila" "🔴 Répondeur Signal coupé" 2>/dev/null || true
+    pkill -RTMIN+9 waybar 2>/dev/null || true
+    echo "🔴 répondeur OFF"
+    ;;
+  toggle)
+    s="off"; [[ -f "$STATE" ]] && s="$(cat "$STATE")"
+    [[ "$s" == "on" ]] && exec "$0" off || exec "$0" on
+    ;;
+  status)
+    s="off"; [[ -f "$STATE" ]] && s="$(cat "$STATE")"
+    echo "répondeur: $s ; délai ${DMIN}-${DMAX}s ; style: $([[ -f "$STYLE" ]] && echo OK || echo ABSENT)"
+    ;;
+  *) echo "usage: king-repondeur on|off|status" >&2; exit 2 ;;
+esac
