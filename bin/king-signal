@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Envoie un message Signal via King Kusaila (signal-cli officiel natif).
+# Usage:
+#   king-signal "mon message"                 -> Note a moi-meme
+#   king-signal +33XXXXXXXXX "mon message"     -> a un numero
+#   king-signal self "mon message"             -> a soi-meme (explicite)
+set -euo pipefail
+SIGNAL="$HOME/.local/bin/signal-cli"
+ACCOUNT="$("$SIGNAL" listAccounts 2>/dev/null | grep -oE '\+[0-9]+' | head -1)"
+[ -n "$ACCOUNT" ] || { echo "king-signal: aucun compte signal-cli lie" >&2; exit 1; }
+
+if [ $# -ge 2 ]; then
+  to="$1"; shift; msg="$*"
+  [ "$to" = "self" ] && to="$ACCOUNT"
+elif [ $# -eq 1 ]; then
+  to="$ACCOUNT"; msg="$1"
+else
+  echo "usage: king-signal [destinataire] <message>" >&2; exit 2
+fi
+
+exec "$SIGNAL" -a "$ACCOUNT" send -m "$msg" "$to"
