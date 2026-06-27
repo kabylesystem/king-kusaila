@@ -7,6 +7,12 @@ STATE="$ROOT/repondeur.state"
 D="$HOME/.local/share/king-kusaila"
 on=0; [[ -f "$STATE" && "$(cat "$STATE" 2>/dev/null)" == "on" ]] && on=1
 
+# --- WATCHDOG : si répondeur ON mais boucle morte -> relance (vert = ça répond) ---
+if [[ "$on" == 1 ]]; then
+  p="$(cat "$ROOT/repondeur.loop.pid" 2>/dev/null || true)"
+  { [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; } || setsid -f "$HOME/.local/bin/king-repondeur" __heal >/dev/null 2>&1
+fi
+
 # --- ligne 1 : l'icône selon l'état ---
 [[ "$on" == 1 ]] && echo "$D/king-icon-on.png" || echo "$D/king-icon-off.png"
 
