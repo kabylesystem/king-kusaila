@@ -1,27 +1,54 @@
 #!/usr/bin/env python3
-"""Panneau de contrôle King Kusaila (GTK3). Ouvert par l'icone King dans Waybar.
-Boutons color-codes selon l'etat (vert = actif, rouge = coupe). Esc / clic dehors ferme."""
-import gi, os, subprocess
+"""Cockpit King Kusaila (GTK3). Ouvert par l'avatar King dans Waybar.
+- Répondeur Signal : bouton vert (actif) / rouge (coupé), clic = bascule.
+- Missions background (Super+V) : ce que King fait/a fait + accès au rapport.
+Ne se ferme qu'apres avoir eu le focus (corrige la fermeture instantanee), ou Esc."""
+import gi, os, glob, subprocess
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
 HOME = os.path.expanduser("~")
-STATE = f"{HOME}/.king-kusaila/repondeur.state"
+ROOT = f"{HOME}/.king-kusaila"
+STATE = f"{ROOT}/repondeur.state"
+JOBS = f"{ROOT}/jobs"
 BIN = f"{HOME}/.local/bin"
 
 
-def repondeur_on() -> bool:
+def repondeur_on():
     try:
         return open(STATE).read().strip() == "on"
     except OSError:
         return False
 
 
+def bg_summary():
+    """(nb missions en cours, libelle derniere mission, statut)."""
+    try:
+        running = int(subprocess.run(
+            "pgrep -fc '[c]laude --print' || true", shell=True,
+            capture_output=True, text=True).stdout.strip() or "0")
+    except Exception:
+        running = 0
+    dirs = sorted(glob.glob(f"{JOBS}/*/"), key=os.path.getmtime, reverse=True)
+    miss, stat = "", ""
+    if dirs:
+        try:
+            for ln in open(f"{dirs[0]}/STATUS.md"):
+                if ln.startswith("- mission:"):
+                    miss = ln.split(":", 1)[1].strip()[:42]
+                if ln.startswith("- status:") or ln.startswith("- exit_code:"):
+                    stat = ln.split(":", 1)[1].strip()
+        except OSError:
+            pass
+    return running, miss, stat
+
+
 CSS = b"""
-window { background-color: rgba(22,19,32,0.97); }
+window { background-color: rgba(22,19,32,0.98); }
 .title { color:#efeaff; font-weight:bold; font-size:14px; }
-.sub   { color:#9a93b5; font-size:10px; }
+.sec   { color:#8f88ac; font-size:10px; font-weight:bold; }
+.info  { color:#c8c2de; font-size:11px; }
 button { margin:3px 10px; padding:9px 12px; border-radius:11px; border:0;
          background:#2b2742; color:#efeaff; font-size:12px; }
 button:hover { background:#3a3556; }
@@ -36,8 +63,9 @@ class Panel(Gtk.Window):
         self.set_title("King Kusaila Panel")
         self.set_decorated(False)
         self.set_resizable(False)
-        self.set_default_size(260, -1)
+        self.set_default_size(272, -1)
         self.set_keep_above(True)
+        self._ready = False
         scr = self.get_screen()
         vis = scr.get_rgba_visual()
         if vis:
@@ -60,6 +88,18 @@ class Panel(Gtk.Window):
         self.btn_rep.connect("clicked", self.toggle_rep)
         box.pack_start(self.btn_rep, False, False, 0)
 
+        sec = Gtk.Label(label="MISSIONS BACKGROUND (Super+V)", xalign=0)
+        sec.get_style_context().add_class("sec")
+        sec.set_margin_start(12)
+        sec.set_margin_top(6)
+        box.pack_start(sec, False, False, 0)
+
+        self.lbl_bg = Gtk.Label(xalign=0)
+        self.lbl_bg.get_style_context().add_class("info")
+        self.lbl_bg.set_margin_start(12)
+        self.lbl_bg.set_line_wrap(True)
+        box.pack_start(self.lbl_bg, False, False, 0)
+
         b2 = Gtk.Button(label="\U0001F4CB  Statut & dernier rapport")
         b2.connect("clicked", self.open_status)
         box.pack_start(b2, False, False, 0)
@@ -70,17 +110,35 @@ class Panel(Gtk.Window):
 
         self.refresh()
         self.connect("key-press-event", self.on_key)
-        self.connect("focus-out-event", lambda *a: self.close())
+        self.connect("focus-in-event", self._on_focus_in)
+        self.connect("focus-out-event", self._on_focus_out)
+
+    # --- focus : ne fermer qu'apres avoir ete focus (sinon ferme instant) ---
+    def _on_focus_in(self, *_):
+        self._ready = True
+        return False
+
+    def _on_focus_out(self, *_):
+        if self._ready:
+            self.close()
+        return False
 
     def refresh(self):
         on = repondeur_on()
         self.btn_rep.set_label(
-            "\U0001F7E2  Repondeur Signal : ACTIF" if on else "\U0001F534  Repondeur Signal : coupe"
-        )
+            "\U0001F7E2  Repondeur Signal : ACTIF" if on else "\U0001F534  Repondeur Signal : coupe")
         ctx = self.btn_rep.get_style_context()
         ctx.remove_class("on")
         ctx.remove_class("off")
         ctx.add_class("on" if on else "off")
+        running, miss, stat = bg_summary()
+        if running:
+            txt = f"\U0001F7E3 {running} en cours…"
+        elif miss:
+            txt = f"derniere : {miss} ({stat})"
+        else:
+            txt = "aucune mission"
+        self.lbl_bg.set_text(txt)
 
     def _run(self, cmd):
         try:
@@ -104,4 +162,5 @@ class Panel(Gtk.Window):
 w = Panel()
 w.connect("destroy", Gtk.main_quit)
 w.show_all()
+w.present()
 Gtk.main()
