@@ -1,0 +1,506 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila-command"
+ROOT="$HOME/.king-kusaila"
+JOBS_DIR="$ROOT/jobs"
+SAAS_DIR="$HOME/future/saas"
+mkdir -p "$STATE_DIR" "$JOBS_DIR"
+
+PID_FILE="$STATE_DIR/record.pid"
+BUSY_LOCK="$STATE_DIR/busy.lock"
+AUDIO_FILE="$STATE_DIR/mission.wav"
+CHOICE_OUT="$STATE_DIR/choice.out"
+CHOICE_LAUNCH_PID="$STATE_DIR/choice-launch.pid"
+CHOICE_DEBUG="$STATE_DIR/choice.debug"
+
+record_source() {
+  if [[ -n "${KING_RECORD_SOURCE:-}" ]]; then
+    printf '%s\n' "$KING_RECORD_SOURCE"
+    return
+  fi
+  pactl list sources short 2>/dev/null |
+    awk '$2 ~ /^alsa_input\./ && $2 !~ /\.monitor$/ { print $2; exit }'
+}
+
+restore_bluetooth_hifi() {
+  "$HOME/.local/bin/sony-audio-fix" >/dev/null 2>&1 || true
+}
+
+start_recording() {
+  local source=""
+  source="$(record_source)"
+  # Lancer pw-record TOUT DE SUITE : ne pas bloquer le debut de la mission sur
+  # le switch de profil Bluetooth (qui peut prendre plusieurs secondes).
+  if [[ -n "$source" ]]; then
+    pw-record --target "$source" --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+  else
+    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+  fi
+  echo "$!" > "$PID_FILE"
+  restore_bluetooth_hifi &  # async : ne touche que la sortie BT, pas le mic
+}
+
+notify() {
+  local level="${2:-info}"
+  case "$level" in
+    rec)
+      "$HOME/.local/bin/king-voice-status" recording "$1"
+      "$HOME/.local/bin/king-kusaila-visual" listen &
+      ;;
+    ok)
+      "$HOME/.local/bin/king-voice-status" done "$1"
+      "$HOME/.local/bin/king-kusaila-visual" done &
+      ;;
+    err)
+      "$HOME/.local/bin/king-voice-status" error "$1"
+      "$HOME/.local/bin/king-kusaila-visual" error &
+      ;;
+    king)
+      "$HOME/.local/bin/king-voice-status" king "$1"
+      "$HOME/.local/bin/king-kusaila-visual" launch &
+      ;;
+    *)
+      "$HOME/.local/bin/king-voice-status" transcribing "$1"
+      "$HOME/.local/bin/king-kusaila-visual" think &
+      ;;
+  esac
+}
+
+slugify() {
+  tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' |
+    cut -c1-48
+}
+
+mission_lower() {
+  tr '[:upper:]' '[:lower:]'
+}
+
+infer_mode() {
+  local mission="$1"
+  local lower=""
+  local bg=0
+  local cc=0
+
+  lower="$(printf '%s' "$mission" | mission_lower)"
+  grep -Eiq '(^|[^a-z])((en )?background|bg|arriere-plan|arrière-plan|tache de fond|tâche de fond|en fond|mode fond|cache|caché|cacher|hidden|silently)([^a-z]|$)' <<<"$lower" && bg=1
+  grep -Eiq 'claude[ -]?code|code claude|terminal|interactif|interactive' <<<"$lower" && cc=1
+
+  if [[ "$bg" -eq 1 && "$cc" -eq 0 ]]; then
+    printf 'background\n'
+  elif [[ "$cc" -eq 1 && "$bg" -eq 0 ]]; then
+    printf 'interactive\n'
+  else
+    printf 'ask\n'
+  fi
+}
+
+project_slug_from_mission() {
+  local raw="$1"
+  local cleaned=""
+
+  cleaned="$(
+    { printf '%s' "$raw" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$raw"; } |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9]+/\n/g' |
+    grep -Ev '^(a|ai|alors|an|and|app|application|avec|background|bg|build|ca|code|claude|create|creer|cree|crée|dans|de|des|du|en|faire|fais|fait|for|genre|interactif|interactive|je|la|le|les|lance|ma|me|mes|mode|moi|mon|new|notes|nouveau|nouvelle|peux|peut|pour|projet|range|saas|site|stp|sur|the|to|tu|un|une|veux|with)$' |
+    head -n 1 || true
+  )"
+
+  printf '%s\n' "${cleaned:-project}"
+}
+
+unique_project_dir() {
+  local base="$1"
+  local dir="$SAAS_DIR/$base"
+  local n=2
+
+  while [[ -e "$dir" ]]; do
+    dir="$SAAS_DIR/$base-$n"
+    n=$((n + 1))
+  done
+  printf '%s\n' "$dir"
+}
+
+write_claude_project_settings() {
+  local project_dir="$1"
+  mkdir -p "$project_dir/.claude"
+  cat > "$project_dir/.claude/settings.local.json" <<'JSON'
+{
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "additionalDirectories": [
+      "/home/kusaila",
+      "/home/kusaila/future"
+    ],
+    "allow": [
+      "Bash(*)",
+      "Edit(*)",
+      "Read(*)",
+      "Write(*)",
+      "MultiEdit(*)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "skipWorkflowUsageWarning": true
+}
+JSON
+}
+
+trust_claude_project_state() {
+  local project_dir="$1"
+  local state="$HOME/.claude.json"
+  local tmp=""
+
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$state" ]] || return 0
+  tmp="$(mktemp)"
+  if jq --arg dir "$project_dir" '
+    .projects = (.projects // {}) |
+    .projects[$dir] = ((.projects[$dir] // {}) + {
+      hasTrustDialogAccepted: true,
+      allowedTools: (.projects[$dir].allowedTools // []),
+      history: (.projects[$dir].history // [])
+    })
+  ' "$state" > "$tmp"; then
+    mv "$tmp" "$state"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+choose_mode() {
+  local mission="$1"
+  local choice=""
+
+  stop_choice_async
+  rm -f "$CHOICE_OUT" "$CHOICE_LAUNCH_PID" "$CHOICE_DEBUG" "$STATE_DIR/choice.err"
+  if [[ -x "$HOME/.local/bin/king-kusaila-choice" ]]; then
+    choice="$(timeout 240s "$HOME/.local/bin/king-kusaila-choice" 2>"$STATE_DIR/choice.err" || true)"
+  elif command -v rofi >/dev/null 2>&1; then
+    choice="$(
+      printf '%s\n%s\n' \
+        'BACKGROUND' \
+        'CLAUDE CODE' |
+        timeout 10s rofi \
+          -dmenu \
+          -i \
+          -no-custom \
+          -only-match \
+          -selected-row 0 \
+          -l 2 \
+          -p "KING KUSAILA" \
+          -theme "$HOME/.config/rofi/king-kusaila-mode.rasi" \
+          2>/dev/null || true
+    )"
+  elif command -v zenity >/dev/null 2>&1; then
+    choice="$(
+      timeout 10s zenity \
+        --list \
+        --title="KING KUSAILA" \
+        --text="$mission" \
+        --column=Mode \
+        'Background' \
+        'Claude Code' \
+        2>/dev/null || true
+    )"
+  fi
+
+  case "$choice" in
+    "background") printf 'background\n' ;;
+    "interactive") printf 'interactive\n' ;;
+    "CLAUDE CODE"*) printf 'interactive\n' ;;
+    "Background"*) printf 'background\n' ;;
+    "Claude Code"*) printf 'interactive\n' ;;
+    *) printf 'cancel\n' ;;
+  esac
+}
+
+start_choice_async() {
+  stop_choice_async
+  rm -f "$CHOICE_OUT" "$CHOICE_LAUNCH_PID" "$CHOICE_DEBUG"
+  if [[ -x "$HOME/.local/bin/king-kusaila-choice" ]]; then
+    timeout 240s "$HOME/.local/bin/king-kusaila-choice" > "$CHOICE_OUT" 2>"$STATE_DIR/choice.err" &
+    printf '%s\n' "$!" > "$CHOICE_LAUNCH_PID"
+  fi
+}
+
+stop_choice_async() {
+  if [[ -f "$CHOICE_LAUNCH_PID" ]]; then
+    kill "$(cat "$CHOICE_LAUNCH_PID" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$CHOICE_LAUNCH_PID"
+  fi
+  if [[ -f "$STATE_DIR/choice.pid" ]]; then
+    kill "$(cat "$STATE_DIR/choice.pid" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$STATE_DIR/choice.pid"
+  fi
+}
+
+finish_choice_async() {
+  local choice=""
+  local launch_pid=""
+
+  if [[ -f "$CHOICE_LAUNCH_PID" ]]; then
+    launch_pid="$(cat "$CHOICE_LAUNCH_PID" 2>/dev/null || true)"
+    if [[ -n "$launch_pid" ]]; then
+      wait "$launch_pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$CHOICE_LAUNCH_PID"
+
+  for _ in {1..20}; do
+    choice="$(cat "$CHOICE_OUT" 2>/dev/null | tail -n 1 || true)"
+    [[ "$choice" == "background" || "$choice" == "interactive" ]] && break
+    choice="$(cat "$CHOICE_DEBUG" 2>/dev/null | tail -n 1 || true)"
+    [[ "$choice" == "background" || "$choice" == "interactive" ]] && break
+    sleep 0.05
+  done
+  rm -f "$CHOICE_OUT"
+  case "$choice" in
+    background|interactive) printf '%s\n' "$choice" ;;
+    *) printf 'cancel\n' ;;
+  esac
+}
+
+# MUTEX: tant qu'une mission est en train de se lancer (transcription / choix /
+# ouverture), on IGNORE tout nouvel appui -> jamais deux King superposes.
+if [[ -f "$BUSY_LOCK" ]]; then
+  busy_pid="$(cat "$BUSY_LOCK" 2>/dev/null || true)"
+  if [[ -n "$busy_pid" ]] && kill -0 "$busy_pid" 2>/dev/null; then
+    exit 0
+  fi
+  rm -f "$BUSY_LOCK"   # lock perime (process mort) -> on nettoie
+fi
+
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  pid="$(cat "$PID_FILE")"
+  # On verrouille des l'arret: toute la phase lancement est protegee.
+  printf '%s\n' "$$" > "$BUSY_LOCK"
+  trap 'rm -f "$BUSY_LOCK"' EXIT
+  # Capturer le moniteur focus MAINTENANT (l'utilisateur y est), avant que
+  # l'overlay / la fenetre de choix ne deplacent le focus -> l'ecran courant.
+  launch_mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' 2>/dev/null | head -n1 || true)"
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in {1..40}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.025
+  done
+  rm -f "$PID_FILE"
+  restore_bluetooth_hifi &  # async : ne pas retarder l'ASR
+
+  "$HOME/.local/bin/king-voice-status" transcribing "ASR"
+  stop_choice_async
+  if ! mission="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE")"; then
+    notify "TRANSCRIPTION FAILED" "err"
+    exit 1
+  fi
+
+  if [[ -z "${mission//[[:space:]]/}" ]]; then
+    notify "NO MISSION DETECTED" "err"
+    exit 0
+  fi
+
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  slug="$(printf '%s' "$mission" | slugify)"
+  [[ -n "$slug" ]] || slug="mission"
+  job="$JOBS_DIR/$stamp-$slug"
+  mkdir -p "$job"
+
+  printf '%s\n' "$mission" > "$job/mission.txt"
+  cat > "$job/system.md" <<'SYSTEM'
+You are King Kusaila, the local AI operator for this CachyOS/Hyprland laptop.
+
+Work like a serious autonomous engineering agent:
+- Continue until the requested task is genuinely complete or clearly blocked.
+- Prefer concrete changes and verifiable outputs over commentary.
+- Use the local filesystem and shell when needed.
+- Keep a concise audit trail in the job folder.
+- MAXIMUM AUTONOMY: solve your own problems before escalating to the human. Read the full error,
+  read the docs/source, try another approach, work around it, debug in a loop (act -> verify -> fix).
+  Asking the user a question is a small failure to avoid. Only stop to ask if you are genuinely BLOCKED
+  (options exhausted), the action is DESTRUCTIVE/irreversible, or the intent is truly AMBIGUOUS.
+- When finished, write FINAL.md with what changed, where, and any remaining risk.
+- In background mode, do the work without waiting for more user chat unless impossible.
+SYSTEM
+
+  "$HOME/.local/bin/king-voice-status" king "MODE"
+  mode="$(infer_mode "$mission")"
+  if [[ "$mode" == "ask" ]]; then
+    mode="$(choose_mode "$mission")"
+  else
+    stop_choice_async
+  fi
+  "$HOME/.local/bin/king-kusaila-visual" stop
+  printf '%s\n' "$mode" > "$job/mode.txt"
+  if [[ "$mode" == "cancel" ]]; then
+    "$HOME/.local/bin/king-voice-status" idle
+    {
+      printf '# King Kusaila Job\n\n'
+      printf -- '- created: %s\n' "$(date -Is)"
+      printf -- '- status: canceled\n'
+      printf -- '- mission: %s\n' "$mission"
+    } > "$job/STATUS.md"
+    exit 0
+  fi
+
+  project_dir="$HOME"
+  if [[ "$mode" == "interactive" ]]; then
+    mkdir -p "$SAAS_DIR"
+    project_slug="$(project_slug_from_mission "$mission")"
+    project_dir="$(unique_project_dir "$project_slug")"
+    mkdir -p "$project_dir"
+    write_claude_project_settings "$project_dir"
+    trust_claude_project_state "$project_dir"
+  fi
+
+  cat > "$job/prompt.md" <<PROMPT
+Mission dictated by the user:
+
+$mission
+
+Job folder: $job
+Project directory: $project_dir
+
+Before finishing:
+1. Write useful logs/artifacts into the job folder when relevant.
+2. Write $job/FINAL.md.
+3. Make the final answer concise and actionable.
+PROMPT
+
+  {
+    printf '# King Kusaila Job\n\n'
+    printf -- '- created: %s\n' "$(date -Is)"
+    printf -- '- status: running\n'
+    printf -- '- mode: %s\n' "$mode"
+    printf -- '- project_dir: %s\n' "$project_dir"
+    printf -- '- mission: %s\n' "$mission"
+  } > "$job/STATUS.md"
+  {
+    printf '\n## %s\n' "$(date -Is)"
+    printf -- '- job: %s\n' "$job"
+    printf -- '- status: started\n'
+    printf -- '- mode: %s\n' "$mode"
+    printf -- '- project_dir: %s\n' "$project_dir"
+    printf -- '- mission: %s\n' "$mission"
+  } >> "$ROOT/LOG.md"
+
+cat > "$job/run-interactive.sh" <<RUN
+#!/usr/bin/env bash
+set +e
+cd "$project_dir"
+claude \\
+  --dangerously-skip-permissions \\
+  --permission-mode bypassPermissions \\
+  --settings "$project_dir/.claude/settings.local.json" \\
+  --add-dir "$HOME" \\
+  --add-dir "$HOME/future" \\
+  --name "King Kusaila - $slug" \\
+  --append-system-prompt "\$(cat "$job/system.md")" \\
+  "\$(cat "$job/prompt.md")"
+code="\$?"
+if [[ "\$code" -eq 0 ]]; then
+  "$HOME/.local/bin/king-voice-status" done "CLAUDE CODE FINISHED"
+  "$HOME/.local/bin/king-kusaila-visual" done
+else
+  "$HOME/.local/bin/king-voice-status" error "CLAUDE CODE CLOSED"
+  "$HOME/.local/bin/king-kusaila-visual" error
+fi
+exit "\$code"
+RUN
+  chmod +x "$job/run-interactive.sh"
+
+cat > "$job/open-cli.sh" <<RUN
+#!/usr/bin/env bash
+set +e
+LAUNCH_MON="$launch_mon"
+# Ouvrir kitty sur le workspace COURANT, comme Super+T : AUCUN switch de
+# workspace, on ne quitte jamais l'ecran de l'utilisateur, la fenetre apparait
+# devant lui. On se contente de (re)focus le bon moniteur si le focus a derive
+# (overlay/choice) -> focusmonitor va sur le workspace actif de ce moniteur,
+# pas sur un workspace vide.
+if command -v hyprctl >/dev/null 2>&1 && [[ -n "\$LAUNCH_MON" ]]; then
+  hyprctl dispatch focusmonitor "\$LAUNCH_MON" >/dev/null 2>&1 || true
+fi
+exec kitty --hold --title "King Kusaila - $slug" -e "$job/run-interactive.sh"
+RUN
+  chmod +x "$job/open-cli.sh"
+
+cat > "$job/run-background.sh" <<RUN
+#!/usr/bin/env bash
+set +e
+cd "$HOME"
+# DEPART: dire qu'on bosse (un job background peut durer, sinon silence total).
+notify-send "King Kusaila" "🟣 Mission lancee en fond: $slug" 2>/dev/null || true
+"$HOME/.local/bin/king-voice-status" king "RUNNING" 2>/dev/null || true
+claude \\
+  --print \\
+  --dangerously-skip-permissions \\
+  --permission-mode bypassPermissions \\
+  --add-dir "$HOME" \\
+  --name "King Kusaila - $slug" \\
+  --append-system-prompt "\$(cat "$job/system.md")" \\
+  "\$(cat "$job/prompt.md")" \\
+  < /dev/null \\
+  > "$job/claude.log" 2>&1
+code="\$?"
+mission_text="\$(cat "$job/mission.txt")"
+# Rapport = FINAL.md si l'agent l'a ecrit, sinon la fin du log.
+if [[ -s "$job/FINAL.md" ]]; then
+  report="\$(cat "$job/FINAL.md")"
+else
+  report="\$(tail -n 20 "$job/claude.log" 2>/dev/null)"
+fi
+{
+  printf '# King Kusaila Job\n\n'
+  printf -- '- finished: %s\n' "\$(date -Is)"
+  printf -- '- exit_code: %s\n' "\$code"
+  printf -- '- project_dir: %s\n' "$project_dir"
+  printf -- '- mission: %s\n' "\$mission_text"
+} > "$job/STATUS.md"
+if [[ "\$code" -eq 0 ]]; then
+  "$HOME/.local/bin/king-voice-status" done "MISSION FINISHED"
+  "$HOME/.local/bin/king-kusaila-visual" done
+  # Montrer le RAPPORT a la fin (extrait), pas juste "fini".
+  notify-send -t 15000 "King Kusaila ✅ $slug" "\$(printf '%s' "\$report" | head -c 350)" 2>/dev/null || true
+else
+  reason="\$(printf '%s' "\$report" | tr '\n' ' ' | head -c 200)"
+  { printf -- '- error_tail: |\n'; tail -n 15 "$job/claude.log" 2>/dev/null | sed 's/^/    /'; } >> "$job/STATUS.md"
+  "$HOME/.local/bin/king-voice-status" error "MISSION FAILED"
+  "$HOME/.local/bin/king-kusaila-visual" error
+  notify-send -u critical "King Kusaila ❌ $slug" "Echec: \$reason" 2>/dev/null || true
+fi
+{
+  printf '\n## %s\n' "\$(date -Is)"
+  printf -- '- job: %s\n' "$job"
+  printf -- '- status: finished\n'
+  printf -- '- exit_code: %s\n' "\$code"
+  printf -- '- mode: background\n'
+} >> "$ROOT/LOG.md"
+RUN
+  chmod +x "$job/run-background.sh"
+
+  if [[ "$mode" == "interactive" ]]; then
+    {
+      printf '[%s] opening interactive cli\n' "$(date -Is)"
+      printf 'job=%s\nproject_dir=%s\nmode=%s\n' "$job" "$project_dir" "$mode"
+    } >> "$job/kitty.log"
+    if command -v hyprctl >/dev/null 2>&1; then
+      hyprctl dispatch exec "$job/open-cli.sh" >> "$job/kitty.log" 2>&1 ||
+        setsid -f "$job/open-cli.sh" >> "$job/kitty.log" 2>&1
+    else
+      setsid -f "$job/open-cli.sh" >> "$job/kitty.log" 2>&1
+    fi
+  else
+    "$job/run-background.sh" &
+  fi
+
+  exit 0
+fi
+
+rm -f "$AUDIO_FILE"
+notify "REC - press Super+V again to launch" "rec"
+start_recording

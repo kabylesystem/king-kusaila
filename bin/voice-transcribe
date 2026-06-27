@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="$HOME/.config/king-kusaila/openai.env"
+BACKEND="${KING_TRANSCRIBE_BACKEND:-}"
+
+if [[ -f "$CONFIG" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+  set +a
+fi
+
+BACKEND="${KING_TRANSCRIBE_BACKEND:-${BACKEND:-openai}}"
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: voice-transcribe <audio-file>" >&2
+  exit 2
+fi
+
+audio="$1"
+
+# ---- Gate anti-hallucination -------------------------------------------------
+# gpt-4o-transcribe / whisper INVENTENT du texte sur du silence ou un clip
+# accidentel (double Super+C). Mesure: parole max_volume ~ -0.2 dB, silence
+# ~ -91 dB. On bloque AVANT l'appel ASR -> aucun faux texte tape dans la
+# fenetre, et zero cout/latence inutile.
+MIN_DUR="${KING_MIN_AUDIO_SEC:-0.35}"     # secondes
+MIN_PEAK_DB="${KING_MIN_PEAK_DB:--40}"    # dB (max_volume)
+
+audio_has_speech() {
+  local f="$1" dur peak
+  command -v ffprobe >/dev/null 2>&1 || return 0   # pas d'outil -> ne pas bloquer
+  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null || true)"
+  if [[ -n "$dur" ]] && awk -v d="$dur" -v m="$MIN_DUR" 'BEGIN{exit !(d+0 < m+0)}'; then
+    return 1   # trop court
+  fi
+  command -v ffmpeg >/dev/null 2>&1 || return 0
+  peak="$(ffmpeg -hide_banner -nostats -i "$f" -af volumedetect -f null /dev/null 2>&1 \
+          | awk -F': ' '/max_volume/{gsub(/ dB/,"",$2); print $2; exit}')"
+  if [[ -n "$peak" ]] && awk -v p="$peak" -v t="$MIN_PEAK_DB" 'BEGIN{exit !(p+0 < t+0)}'; then
+    return 1   # silence
+  fi
+  return 0
+}
+
+if [[ -f "$audio" ]] && ! audio_has_speech "$audio"; then
+  exit 0   # silence / trop court -> sortie vide, l'appelant ne tape rien
+fi
+
+# ---- Backends ----------------------------------------------------------------
+transcribe() {
+  if [[ "$BACKEND" == "local" ]]; then
+    "$HOME/.local/bin/voice-transcribe-local" "$audio"
+    return
+  fi
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    local text
+    if text="$("$HOME/.local/bin/voice-transcribe-openai" "$audio")" && [[ -n "${text//[[:space:]]/}" ]]; then
+      printf '%s\n' "$text"
+      return
+    fi
+  fi
+  "$HOME/.local/bin/voice-transcribe-local" "$audio"
+}
+
+raw="$(transcribe || true)"
+
+# ---- Filtre final: artefacts d'hallucination connus --------------------------
+# Tue uniquement si TOUTE la sortie == un artefact connu (insensible casse).
+# Inoffensif pour la vraie dictee: personne ne dicte exactement ces phrases.
+norm="$(printf '%s' "$raw" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E "s/^[[:space:]]+//; s/[[:space:]]+\$//; s/[[:space:]]+/ /g")"
+case "$norm" in
+  "sous-titres réalisés par la communauté d'amara.org"|\
+  "sous-titres réalisés par l'amara.org"|\
+  "sous-titrage société radio-canada"|\
+  "merci d'avoir regardé cette vidéo"|\
+  "merci d'avoir regardé cette vidéo !"|\
+  "merci d'avoir regardé"|\
+  "merci."|\
+  "thank you for watching"|\
+  "thanks for watching"|\
+  "thank you."|\
+  "you"|\
+  "..."|"."|"♪"|"♪♪"|"[musique]"|"[music]")
+    exit 0 ;;
+esac
+
+[[ -n "${raw//[[:space:]]/}" ]] && printf '%s\n' "$raw"
+exit 0

@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+import os
+import signal
+import socket
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
+
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import GtkLayerShell
+
+
+STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "king-kusaila"
+SOCKET_PATH = STATE_DIR / "visuald.sock"
+PID_FILE = STATE_DIR / "visuald.pid"
+FRAME_DIR = Path.home() / ".king-kusaila/assets/frames"
+
+
+def focused_monitor_info():
+    try:
+        raw = subprocess.check_output(
+            ["hyprctl", "monitors", "-j"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.4,
+        )
+        for monitor in json.loads(raw):
+            if monitor.get("focused"):
+                scale = monitor.get("scale") or 1
+                return {
+                    "name": monitor.get("name"),
+                    "x": int(monitor.get("x", 0)),
+                    "y": int(monitor.get("y", 0)),
+                    "width": int(monitor.get("width", 0) / scale),
+                    "height": int(monitor.get("height", 0) / scale),
+                }
+    except Exception:
+        return None
+    return None
+
+
+def monitor_geometry():
+    display = Gdk.Display.get_default()
+    monitor = None
+    focused = focused_monitor_info()
+    if focused:
+        for idx in range(display.get_n_monitors()):
+            candidate = display.get_monitor(idx)
+            connector = getattr(candidate, "get_connector", lambda: None)()
+            geometry = candidate.get_geometry()
+            same_connector = connector and connector == focused["name"]
+            same_geometry = (
+                geometry.x == focused["x"]
+                and geometry.y == focused["y"]
+                and geometry.width == focused["width"]
+                and geometry.height == focused["height"]
+            )
+            if same_connector or same_geometry:
+                monitor = candidate
+                break
+    if monitor is None:
+        monitor = display.get_primary_monitor()
+    if monitor is None:
+        monitor = display.get_monitor(0)
+    geometry = monitor.get_geometry()
+    return monitor, int(geometry.width), int(geometry.height)
+
+
+def frame_dir_for_mode(mode: str) -> Path:
+    if mode in ("listen", "record", "talk", "speaking"):
+        return FRAME_DIR / "talking"
+    if mode in ("think", "transcribe", "processing", "working"):
+        return FRAME_DIR / "dancing"
+    if mode in ("done", "success", "launch", "king", "celebrate"):
+        return FRAME_DIR / "celebrating"
+    if mode in ("error", "failed", "blocked"):
+        return FRAME_DIR / "sulking"
+    return FRAME_DIR / "talking"
+
+
+def target_for_mode(mode: str):
+    timed_modes = {"done", "success", "launch", "king", "error", "failed"}
+    return "center", 280, 376, 4.5 if mode in timed_modes else 0
+
+
+class VisualDaemon:
+    def __init__(self):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
+        try:
+            SOCKET_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.sock.bind(str(SOCKET_PATH))
+        self.sock.setblocking(False)
+        GLib.io_add_watch(self.sock.fileno(), GLib.IO_IN, self.on_socket)
+
+        self.frames: list[GdkPixbuf.Pixbuf] = []
+        self.frame_paths: list[Path] = []
+        self.first_frame_cache = {}
+        self.load_next = 0
+        self.idx = 0
+        self.hide_source = 0
+        self.tick_source = 0
+        self.current_size = (150, 202)
+        self.blank = GdkPixbuf.Pixbuf.new(
+            GdkPixbuf.Colorspace.RGB, True, 8, 1, 1
+        )
+        self.blank.fill(0x00000000)
+
+        self.win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+        self.win.set_title("King Kusaila Visual")
+        self.win.set_decorated(False)
+        self.win.set_keep_above(True)
+        self.win.set_skip_taskbar_hint(True)
+        self.win.set_skip_pager_hint(True)
+        self.win.set_accept_focus(False)
+        self.win.set_focus_on_map(False)
+        self.win.set_app_paintable(True)
+        self.win.set_resizable(False)
+        self.win.set_opacity(1.0)
+
+        screen = self.win.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            self.win.set_visual(visual)
+
+        GtkLayerShell.init_for_window(self.win)
+        GtkLayerShell.set_namespace(self.win, "king-kusaila")
+        GtkLayerShell.set_layer(self.win, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_exclusive_zone(self.win, -1)
+
+        css = b"""
+        window, image {
+          background: transparent;
+          border: 0;
+          box-shadow: none;
+        }
+        """
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self.image = Gtk.Image()
+        self.win.add(self.image)
+        self.win.connect("delete-event", self.on_delete_event)
+        GLib.idle_add(self.preload_first_frames)
+
+    def on_delete_event(self, *_args):
+        self.hide()
+        return True
+
+    def preload_first_frames(self):
+        for mode in ("listen", "think", "done", "error"):
+            position, width, height, _seconds = target_for_mode(mode)
+            paths = sorted(frame_dir_for_mode(mode).glob("*.png"))
+            if paths:
+                key = (str(frame_dir_for_mode(mode)), width, height)
+                self.first_frame_cache[key] = self.scaled(paths[0], width, height)
+        return False
+
+    def configure_position(self, position: str, width: int, height: int):
+        self.current_size = (width, height)
+        self.win.set_default_size(width, height)
+        self.win.resize(width, height)
+
+        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.BOTTOM, False)
+        if position == "center":
+            monitor, screen_w, screen_h = monitor_geometry()
+            if monitor is not None:
+                GtkLayerShell.set_monitor(self.win, monitor)
+            left = max(0, int((screen_w - width) / 2))
+            top = max(0, int((screen_h - height) / 2))
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.LEFT, True)
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.RIGHT, False)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.LEFT, left)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT, 0)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, top)
+        else:
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.LEFT, False)
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.RIGHT, True)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.LEFT, 0)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT, 26)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, 56)
+
+    def load_first_frame(self, mode: str, width: int, height: int):
+        self.frame_paths = sorted(frame_dir_for_mode(mode).glob("*.png"))
+        self.frames = []
+        self.idx = 0
+        self.load_next = 0
+        if not self.frame_paths:
+            return
+        cache_key = (str(frame_dir_for_mode(mode)), width, height)
+        first = self.first_frame_cache.get(cache_key)
+        if first is None:
+            first = self.scaled(self.frame_paths[0], width, height)
+            self.first_frame_cache[cache_key] = first
+        self.frames.append(first)
+        self.load_next = 1
+        self.image.set_from_pixbuf(self.frames[0])
+        GLib.idle_add(self.load_more_frames)
+
+    def scaled(self, path: Path, width: int, height: int):
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
+        return pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+
+    def load_more_frames(self):
+        width, height = self.current_size
+        end = min(self.load_next + 8, len(self.frame_paths))
+        for path in self.frame_paths[self.load_next : end]:
+            self.frames.append(self.scaled(path, width, height))
+        self.load_next = end
+        return self.load_next < len(self.frame_paths)
+
+    def show_mode(self, mode: str):
+        if self.hide_source:
+            GLib.source_remove(self.hide_source)
+            self.hide_source = 0
+        position, width, height, seconds = target_for_mode(mode)
+        self.win.set_opacity(1.0)
+        self.configure_position(position, width, height)
+        self.load_first_frame(mode, width, height)
+        self.win.show_all()
+        if not self.tick_source:
+            self.tick_source = GLib.timeout_add(42, self.tick)
+        if seconds > 0:
+            self.hide_source = GLib.timeout_add(int(seconds * 1000), self.hide)
+
+    def hide(self):
+        self.hide_source = 0
+        if self.tick_source:
+            GLib.source_remove(self.tick_source)
+            self.tick_source = 0
+        self.frames = []
+        self.frame_paths = []
+        self.idx = 0
+        self.win.set_opacity(0.01)
+        self.current_size = (1, 1)
+        self.win.set_default_size(1, 1)
+        self.win.resize(1, 1)
+        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.LEFT, True)
+        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.RIGHT, False)
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, 0)
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.LEFT, 0)
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT, 0)
+        self.image.set_from_pixbuf(self.blank)
+        self.win.show_all()
+        return False
+
+    def tick(self):
+        if self.win.get_visible() and self.frames:
+            self.idx = (self.idx + 1) % len(self.frames)
+            self.image.set_from_pixbuf(self.frames[self.idx])
+            return True
+        self.tick_source = 0
+        return False
+
+    def on_socket(self, _fd, _condition):
+        try:
+            data = self.sock.recv(256).decode("utf-8", "ignore").strip()
+        except BlockingIOError:
+            return True
+        if data in ("stop", "hide", "cancel"):
+            self.hide()
+        elif data in ("quit", "exit"):
+            Gtk.main_quit()
+        elif data:
+            self.show_mode(data)
+        return True
+
+
+def cleanup_files():
+    try:
+        SOCKET_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        PID_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def shutdown(*_args):
+    cleanup_files()
+    Gtk.main_quit()
+
+
+def main() -> int:
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+    VisualDaemon()
+    Gtk.main()
+    cleanup_files()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

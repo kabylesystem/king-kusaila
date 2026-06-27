@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila"
+SOCKET="$STATE_DIR/visuald.sock"
+PID_FILE="$STATE_DIR/visuald.pid"
+mode="${1:-listen}"
+
+mkdir -p "$STATE_DIR"
+
+daemon_alive() {
+  [[ -S "$SOCKET" ]] || return 1
+  [[ -f "$PID_FILE" ]] || return 1
+  kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+}
+
+start_daemon() {
+  if daemon_alive; then
+    return 0
+  fi
+  rm -f "$SOCKET" "$PID_FILE"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid -f "$HOME/.local/bin/king-kusaila-visuald" >/tmp/king-kusaila-visuald.log 2>&1 </dev/null
+  else
+    nohup "$HOME/.local/bin/king-kusaila-visuald" >/tmp/king-kusaila-visuald.log 2>&1 </dev/null &
+  fi
+  for _ in {1..80}; do
+    daemon_alive && return 0
+    sleep 0.01
+  done
+  return 1
+}
+
+send_command() {
+  local command="$1"
+  "$HOME/.local/bin/king-kusaila-send" "$SOCKET" "$command"
+}
+
+if [[ "$mode" == "--daemon-start" ]]; then
+  start_daemon
+  exit 0
+fi
+
+start_daemon
+send_command "$mode"

@@ -1,0 +1,23 @@
+# Secrets — JAMAIS
+*.env
+!*.env.example
+config/openai.env
+
+# Trace Claude — jamais sur GitHub
+.claude/
+CLAUDE.md
+session.md
+steps/
+
+# Données perso / runtime
+jobs/
+voice-notes/
+*.log
+
+# Assets générés (regénérables depuis assets/transparent/*.webm)
+assets/frames/
+
+# Divers
+__pycache__/
+*.pyc
+.DS_Store

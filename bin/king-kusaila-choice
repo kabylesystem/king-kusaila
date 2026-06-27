@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
+
+
+STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "king-kusaila-command"
+PID_FILE = STATE_DIR / "choice.pid"
+LOG_FILE = STATE_DIR / "choice.debug"
+FRAME_DIR = Path.home() / ".king-kusaila/assets/frames/choice"
+WIDTH = 330
+HEIGHT = 443
+SCALE = WIDTH / 560
+
+
+def load_frame(path: Path) -> GdkPixbuf.Pixbuf:
+    pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
+    return pixbuf.scale_simple(WIDTH, HEIGHT, GdkPixbuf.InterpType.BILINEAR)
+
+
+def frame_paths() -> list[Path]:
+    paths = sorted(FRAME_DIR.glob("*.png"))
+    if not paths:
+        fallback = Path.home() / ".king-kusaila/assets/frames/celebrating/0001.png"
+        paths = [fallback]
+    return paths
+
+
+def main() -> int:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+
+    paths = frame_paths()
+    frames = [load_frame(paths[0])]
+    result = {"value": "cancel"}
+    selected = {"value": "background"}
+    started_at = {"value": time.monotonic()}
+
+    def finish(value: str):
+        result["value"] = value
+        try:
+            LOG_FILE.write_text(f"{value}\n")
+        except OSError:
+            pass
+        try:
+            PID_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        Gtk.main_quit()
+
+    def cancel(*_args):
+        finish("cancel")
+
+    signal.signal(signal.SIGINT, cancel)
+    signal.signal(signal.SIGTERM, cancel)
+
+    win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+    win.set_title("King Kusaila Choice")
+    win.set_decorated(False)
+    win.set_keep_above(True)
+    win.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+    win.set_resizable(False)
+    win.set_default_size(WIDTH, HEIGHT)
+    win.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+    win.set_app_paintable(True)
+    win.add_events(
+        Gdk.EventMask.BUTTON_RELEASE_MASK
+        | Gdk.EventMask.POINTER_MOTION_MASK
+    )
+
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        win.set_visual(visual)
+
+    def clear_window(_widget, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        return False
+
+    win.connect("draw", clear_window)
+
+    css = b"""
+    * {
+      background: transparent;
+      background-color: transparent;
+      border: 0;
+      box-shadow: none;
+    }
+    .hit { background: transparent; border: 0; box-shadow: none; }
+    """
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css)
+    Gtk.StyleContext.add_provider_for_screen(
+        screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+    fixed = Gtk.Fixed()
+    image_boost = Gtk.Image()
+    image_boost.set_sensitive(False)
+    image_boost.set_from_pixbuf(frames[0])
+    fixed.put(image_boost, 0, 0)
+
+    image = Gtk.Image()
+    image.set_sensitive(False)
+    image.set_from_pixbuf(frames[0])
+    fixed.put(image, 0, 0)
+
+    hover = Gtk.DrawingArea()
+    hover.set_sensitive(False)
+    hover.set_size_request(WIDTH, HEIGHT)
+    fixed.put(hover, 0, 0)
+
+    click_hit = Gtk.EventBox()
+    click_hit.set_visible_window(False)
+    click_hit.add_events(
+        Gdk.EventMask.BUTTON_RELEASE_MASK
+        | Gdk.EventMask.POINTER_MOTION_MASK
+        | Gdk.EventMask.ENTER_NOTIFY_MASK
+    )
+    click_hit.set_size_request(WIDTH, HEIGHT)
+    fixed.put(click_hit, 0, 0)
+    win.add(fixed)
+
+    click_hit.get_style_context().add_class("hit")
+
+    def draw_hover(_area, cr):
+        if selected["value"] == "background":
+            cx, cy, radius = int(135 * SCALE), int(183 * SCALE), int(125 * SCALE)
+            cr.set_source_rgba(0.15, 0.65, 1.0, 0.075)
+        else:
+            cx, cy, radius = int(440 * SCALE), int(181 * SCALE), int(115 * SCALE)
+            cr.set_source_rgba(1.0, 0.22, 0.18, 0.085)
+        cr.arc(cx, cy, radius, 0, 6.28318)
+        cr.fill()
+        return False
+
+    hover.connect("draw", draw_hover)
+
+    def refresh_selection():
+        hover.queue_draw()
+
+    def select_background(*_args):
+        selected["value"] = "background"
+        refresh_selection()
+        return True
+
+    def select_interactive(*_args):
+        selected["value"] = "interactive"
+        refresh_selection()
+        return True
+
+    def click_choice(value: str):
+        if time.monotonic() - started_at["value"] < 0.25:
+            return True
+        finish(value)
+        return True
+
+    def pointer_choice(event):
+        return "interactive" if event.x >= WIDTH / 2 else "background"
+
+    def on_click(_widget, event):
+        return click_choice(pointer_choice(event))
+
+    def on_motion(_widget, event):
+        selected["value"] = pointer_choice(event)
+        refresh_selection()
+        return True
+
+    click_hit.connect("button-release-event", on_click)
+    click_hit.connect("motion-notify-event", on_motion)
+    win.connect("button-release-event", on_click)
+    win.connect("motion-notify-event", on_motion)
+
+    idx = {"value": 0}
+    load_state = {"next": 1}
+
+    def load_more_frames() -> bool:
+        end = min(load_state["next"] + 8, len(paths))
+        for path in paths[load_state["next"] : end]:
+            frames.append(load_frame(path))
+        load_state["next"] = end
+        return load_state["next"] < len(paths)
+
+    def tick() -> bool:
+        idx["value"] = (idx["value"] + 1) % len(frames)
+        image_boost.set_from_pixbuf(frames[idx["value"]])
+        image.set_from_pixbuf(frames[idx["value"]])
+        return True
+
+    GLib.timeout_add(42, tick)
+
+    # Auto-disparition: si l'utilisateur ne choisit pas, le choix s'efface seul.
+    CHOICE_TIMEOUT_S = int(os.environ.get("KING_CHOICE_TIMEOUT", "10"))
+
+    def auto_dismiss():
+        finish("cancel")
+        return False
+
+    GLib.timeout_add_seconds(CHOICE_TIMEOUT_S, auto_dismiss)
+
+    def on_key(_win, event):
+        if event.keyval == Gdk.KEY_Escape:
+            finish("cancel")
+            return True
+        if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Up, Gdk.KEY_h, Gdk.KEY_k):
+            selected["value"] = "background"
+            refresh_selection()
+            return True
+        if event.keyval in (Gdk.KEY_Right, Gdk.KEY_Down, Gdk.KEY_l, Gdk.KEY_j):
+            selected["value"] = "interactive"
+            refresh_selection()
+            return True
+        key = (Gdk.keyval_name(event.keyval) or "").lower()
+        if key in ("c", "i"):
+            finish("interactive")
+            return True
+        if key == "b":
+            finish("background")
+            return True
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            finish(selected["value"])
+            return True
+        if key == "c" and event.state & Gdk.ModifierType.MOD4_MASK:
+            finish("cancel")
+            return True
+        return False
+
+    win.connect("key-press-event", on_key)
+    win.connect("destroy", cancel)
+    win.show_all()
+    win.present()
+    refresh_selection()
+    subprocess.Popen(
+        [str(Path.home() / ".local/bin/king-kusaila-visual"), "hide"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    GLib.idle_add(load_more_frames)
+    Gtk.main()
+
+    try:
+        PID_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+    if result["value"] in ("background", "interactive"):
+        print(result["value"])
+        return 0
+    return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

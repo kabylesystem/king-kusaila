@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila"
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  STATE_DIR="/tmp/king-kusaila-$USER"
+fi
+STATE_FILE="$STATE_DIR/voice-status"
+mkdir -p "$STATE_DIR"
+
+state="${1:-idle}"
+shift || true
+label="${*:-}"
+now="$(date +%s)"
+
+case "$state" in
+  idle|recording|transcribing|done|error|king) ;;
+  *) state="idle" ;;
+esac
+
+if [[ "$state" == "idle" ]]; then
+  rm -f "$STATE_FILE"
+else
+  printf '%s|%s|%s\n' "$state" "$label" "$now" > "$STATE_FILE"
+fi
+
+pkill -RTMIN+8 waybar >/dev/null 2>&1 || true

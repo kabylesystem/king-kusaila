@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+"$HOME/.local/bin/king-voice-status" recording "REC"
+"$HOME/.local/bin/king-kusaila-visual" listen
+sleep 2
+"$HOME/.local/bin/king-voice-status" transcribing "TRANSCRIBING"
+"$HOME/.local/bin/king-kusaila-visual" think
+sleep 2
+"$HOME/.local/bin/king-voice-status" king "CHOOSE MODE"
+"$HOME/.local/bin/king-kusaila-visual" talk
+sleep 2
+"$HOME/.local/bin/king-voice-status" done "DONE"
+"$HOME/.local/bin/king-kusaila-visual" done

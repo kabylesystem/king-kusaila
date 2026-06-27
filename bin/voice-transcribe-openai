@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+import json
+import mimetypes
+import os
+import secrets
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def load_env(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
+    boundary = "----king-kusaila-" + secrets.token_hex(16)
+    body = bytearray()
+
+    def add(value: bytes) -> None:
+        body.extend(value)
+
+    for name, value in fields.items():
+        add(f"--{boundary}\r\n".encode())
+        add(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        add(str(value).encode())
+        add(b"\r\n")
+
+    for name, path in files.items():
+        filename = path.name
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        add(f"--{boundary}\r\n".encode())
+        add(
+            (
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+                f"Content-Type: {ctype}\r\n\r\n"
+            ).encode()
+        )
+        add(path.read_bytes())
+        add(b"\r\n")
+
+    add(f"--{boundary}--\r\n".encode())
+    return bytes(body), boundary
+
+
+def main() -> int:
+    load_env(Path.home() / ".config/king-kusaila/openai.env")
+
+    if len(sys.argv) < 2:
+        print("usage: voice-transcribe-openai <audio-file>", file=sys.stderr)
+        return 2
+
+    audio = Path(sys.argv[1])
+    if not audio.exists():
+        print(f"voice-transcribe-openai: audio file not found: {audio}", file=sys.stderr)
+        return 1
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("voice-transcribe-openai: OPENAI_API_KEY is not set", file=sys.stderr)
+        return 1
+
+    model = os.environ.get("KING_OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+    prompt = os.environ.get(
+        "KING_OPENAI_TRANSCRIBE_PROMPT",
+        "Claude, Claude Code, Codex, Anthropic, Cursor, OpenAI, Hyprland, CachyOS, HyDE, Waybar, "
+        "Wayland, kitty, Vercel, Next.js, React, Tailwind, shadcn, Supabase, GitHub, Higgsfield, "
+        "Kabyle, King Kusaila.",
+    )
+    fields = {
+        "model": model,
+        "response_format": "json",
+        # temperature 0 = deterministe, reduit fortement les hallucinations.
+        "temperature": os.environ.get("KING_OPENAI_TRANSCRIBE_TEMPERATURE", "0"),
+        "prompt": prompt,
+    }
+    body, boundary = multipart(fields, {"file": audio})
+
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/audio/transcriptions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        print(f"voice-transcribe-openai: HTTP {exc.code}: {detail}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"voice-transcribe-openai: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        parsed = json.loads(payload)
+        text = parsed.get("text", "")
+    except json.JSONDecodeError:
+        text = payload
+
+    text = " ".join(text.split())
+
+    # Garde anti-echo: gpt-4o-transcribe renvoie parfois le PROMPT lui-meme quand
+    # l'audio est vide/incomprehensible. Si la sortie EST le prompt (egal ou
+    # sous-chaine), ce n'est pas une vraie transcription -> on rejette (-> fallback
+    # local / pas de fausse mission). Une vraie phrase n'est jamais une sous-chaine
+    # de la liste de vocabulaire.
+    def _flat(s: str) -> str:
+        return " ".join("".join(c.lower() if c.isalnum() else " " for c in s).split())
+
+    if text:
+        nt, npr = _flat(text), _flat(prompt)
+        if nt and (nt == npr or nt in npr or npr in nt):
+            print("voice-transcribe-openai: prompt echo detecte, rejet", file=sys.stderr)
+            return 1
+        print(text)
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

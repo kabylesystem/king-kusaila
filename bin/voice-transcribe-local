@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL="${KING_WHISPER_MODEL:-$HOME/.local/share/whisper.cpp/models/ggml-base.bin}"
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: voice-transcribe <audio.wav>" >&2
+  exit 2
+fi
+
+audio="$1"
+if [[ ! -f "$audio" ]]; then
+  echo "voice-transcribe: audio file not found: $audio" >&2
+  exit 1
+fi
+if [[ ! -f "$MODEL" ]]; then
+  echo "voice-transcribe: model file not found: $MODEL" >&2
+  exit 1
+fi
+
+base="${audio%.*}"
+out="$base.txt"
+log="$base.whisper.log"
+
+whisper-cli \
+  --model "$MODEL" \
+  --file "$audio" \
+  --language auto \
+  --no-timestamps \
+  --output-txt \
+  --output-file "$base" \
+  --threads "${KING_WHISPER_THREADS:-8}" \
+  >"$log" 2>&1
+
+if [[ ! -f "$out" ]]; then
+  echo "voice-transcribe: whisper produced no text file; log: $log" >&2
+  exit 1
+fi
+
+sed \
+  -e 's/\[BLANK_AUDIO\]//g' \
+  -e 's/^[[:space:]]*//' \
+  -e 's/[[:space:]]*$//' \
+  "$out" | awk 'NF {print}'

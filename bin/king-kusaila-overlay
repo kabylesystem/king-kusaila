@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+import argparse
+import signal
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
+
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+    from gi.repository import GtkLayerShell
+except (ImportError, ValueError):
+    GtkLayerShell = None
+
+
+def load_frame(path: Path, width: int, height: int) -> GdkPixbuf.Pixbuf:
+    pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
+    return pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--frames", required=True)
+    parser.add_argument("--title", default="King Kusaila Visual")
+    parser.add_argument("--width", type=int, default=180)
+    parser.add_argument("--height", type=int, default=242)
+    parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--seconds", type=float, default=0)
+    parser.add_argument("--position", choices=["top-right", "center"], default="top-right")
+    parser.add_argument("--margin-top", type=int, default=56)
+    parser.add_argument("--margin-left", type=int, default=0)
+    parser.add_argument("--margin-right", type=int, default=26)
+    parser.add_argument("--opacity", type=float, default=0.92)
+    args = parser.parse_args()
+
+    frame_dir = Path(args.frames)
+    frame_paths = sorted(frame_dir.glob("*.png"))
+    if not frame_paths:
+        print(f"king-kusaila-overlay: no frames in {frame_dir}", file=sys.stderr)
+        return 1
+    frames = [load_frame(frame_paths[0], args.width, args.height)]
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+    win.set_title(args.title)
+    win.set_decorated(False)
+    win.set_keep_above(True)
+    win.set_skip_taskbar_hint(True)
+    win.set_skip_pager_hint(True)
+    win.set_accept_focus(False)
+    win.set_focus_on_map(False)
+    win.set_app_paintable(True)
+    win.set_resizable(False)
+    win.set_default_size(args.width, args.height)
+    win.set_opacity(max(0.05, min(1.0, args.opacity)))
+
+    if GtkLayerShell is not None:
+        GtkLayerShell.init_for_window(win)
+        GtkLayerShell.set_namespace(win, "king-kusaila")
+        GtkLayerShell.set_layer(win, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.NONE)
+        if args.position == "center":
+            GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, True)
+            GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.LEFT, True)
+            GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, args.margin_top)
+            GtkLayerShell.set_margin(win, GtkLayerShell.Edge.LEFT, args.margin_left)
+        else:
+            GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, True)
+            GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.RIGHT, True)
+            GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, args.margin_top)
+            GtkLayerShell.set_margin(win, GtkLayerShell.Edge.RIGHT, args.margin_right)
+        GtkLayerShell.set_exclusive_zone(win, -1)
+    else:
+        win.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
+
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        win.set_visual(visual)
+
+    css = b"""
+    window, image {
+      background-color: transparent;
+      border: 0;
+      box-shadow: none;
+    }
+    """
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css)
+    Gtk.StyleContext.add_provider_for_screen(
+        screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+    image = Gtk.Image()
+    image.set_from_pixbuf(frames[0])
+    win.add(image)
+
+    load_state = {"next": 1}
+
+    def load_more_frames() -> bool:
+        end = min(load_state["next"] + 6, len(frame_paths))
+        for path in frame_paths[load_state["next"] : end]:
+            frames.append(load_frame(path, args.width, args.height))
+        load_state["next"] = end
+        return load_state["next"] < len(frame_paths)
+
+    idx = {"value": 0}
+
+    def tick() -> bool:
+        idx["value"] = (idx["value"] + 1) % len(frames)
+        image.set_from_pixbuf(frames[idx["value"]])
+        return True
+
+    interval = max(16, int(1000 / max(1, args.fps)))
+    GLib.timeout_add(interval, tick)
+
+    if args.seconds > 0:
+        GLib.timeout_add(int(args.seconds * 1000), Gtk.main_quit)
+
+    def on_key(_win, event):
+        if event.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+        return False
+
+    win.connect("key-press-event", on_key)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    GLib.idle_add(load_more_frames)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
