@@ -22,7 +22,13 @@ if [[ -f "$CFG" ]] && ! grep -q 'custom/king-voice' "$CFG" 2>/dev/null; then
     cp -f "$LAYOUT" "$CFG"
     log "King + DND réinjectés dans config.jsonc"
     killall waybar 2>/dev/null || true
-    setsid -f waybar >/dev/null 2>&1 || true
+    sleep 1
+    # relance via le compositeur (il possède le process → survit), sinon fallback
+    if command -v hyprctl >/dev/null 2>&1 && hyprctl dispatch exec waybar >/dev/null 2>&1; then
+      :
+    else
+      setsid -f waybar >/dev/null 2>&1 || true
+    fi
     did=1
   else
     log "ERREUR : layout canonique introuvable ($LAYOUT)"
