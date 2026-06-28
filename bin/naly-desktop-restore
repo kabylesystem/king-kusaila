@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# naly-desktop-restore — réinjecte les customisations que HyDE écrase à chaque
+# changement de thème :
+#   1. modules Waybar King Kusaila (🔴 REC + 👑 couronne répondeur) + bouton DND
+#   2. glass dunst (notifs sombres translucides ~15 %, sans bordure)
+#
+# Idempotent : n'agit QUE si une custo manque réellement → pas de boucle infinie
+# avec le watcher systemd (naly-desktop-restore.path).
+set -uo pipefail
+
+CFG="$HOME/.config/waybar/config.jsonc"
+LAYOUT="$HOME/.local/share/waybar/layouts/naly-top.jsonc"
+GLASS="$HOME/.cache/hyde/wallbash/dunst.conf"
+WALLBASH_DUNST="$HOME/.local/share/wallbash/scripts/dunst.sh"
+
+log() { printf '%s naly-restore: %s\n' "$(date +%H:%M:%S)" "$*"; }
+did=0
+
+# ── 1. Waybar : King absent de la barre ? → réappliquer le layout canonique ──
+if [[ -f "$CFG" ]] && ! grep -q 'custom/king-voice' "$CFG" 2>/dev/null; then
+  if [[ -f "$LAYOUT" ]]; then
+    cp -f "$LAYOUT" "$CFG"
+    log "King + DND réinjectés dans config.jsonc"
+    killall waybar 2>/dev/null || true
+    setsid -f waybar >/dev/null 2>&1 || true
+    did=1
+  else
+    log "ERREUR : layout canonique introuvable ($LAYOUT)"
+  fi
+fi
+
+# ── 2. Glass dunst : marqueur naly absent du cache ? → réécrire + régénérer ──
+if ! grep -q 'naly-glass' "$GLASS" 2>/dev/null; then
+  mkdir -p "$(dirname "$GLASS")"
+  cat > "$GLASS" <<'EOF'
+# naly-glass : notifs translucides sombres (Tokyo Night) SANS bordure.
+# Réécrit automatiquement par naly-desktop-restore après chaque switch de thème HyDE.
+# (le flou vient de Hyprland : layerrule blur sur namespace "notifications" dans userprefs.conf)
+
+[urgency_low]
+    background = "#1a1b2626"
+    foreground = "#c0caf5ff"
+    frame_color = "#00000000"
+    icon = "${iconsDir}/Wallbash-Icon/hyprdots.svg"
+    timeout = 5
+
+[urgency_normal]
+    background = "#24283b26"
+    foreground = "#c0caf5ff"
+    frame_color = "#00000000"
+    icon = "${iconsDir}/Wallbash-Icon/hyprdots.svg"
+    timeout = 5
+EOF
+  log "glass dunst réinjecté dans le cache wallbash"
+  if [[ -x "$WALLBASH_DUNST" ]]; then
+    "$WALLBASH_DUNST" >/dev/null 2>&1 || true
+  else
+    hyde-shell wallbash dunst >/dev/null 2>&1 || true
+  fi
+  dunstctl reload >/dev/null 2>&1 || true
+  did=1
+fi
+
+[[ "$did" == 1 ]] && log "restauration appliquée." || log "rien à faire (déjà OK)."
+exit 0

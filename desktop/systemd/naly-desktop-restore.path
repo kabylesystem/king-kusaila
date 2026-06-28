@@ -1,0 +1,9 @@
+[Unit]
+Description=Surveille les configs régénérées par HyDE (Waybar + glass dunst) pour réappliquer les custos de naly
+
+[Path]
+PathChanged=%h/.config/waybar/config.jsonc
+PathChanged=%h/.cache/hyde/wallbash/dunst.conf
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,40 @@
+// Modules Waybar custom de naly — King Kusaila + bouton DND.
+// Posé hors de config.jsonc (régénéré par HyDE) : toujours chargé via l'include
+// "modules/*json*", donc les DÉFINITIONS survivent aux régénérations/switch de thème.
+// Les NOMS de ces modules sont (re)mis dans la barre par ~/.local/bin/naly-desktop-restore
+// (déclenché par le watcher systemd naly-desktop-restore.path après chaque régén HyDE).
+{
+    "custom/claude": {
+        "exec": "$HOME/.local/bin/waybar-claude.sh",
+        "return-type": "json",
+        "interval": 30,
+        "tooltip": true,
+        "on-click": "kitty --title 'Claude Launcher' -e $HOME/.local/bin/claude-here.sh"
+    },
+    "custom/king-voice": {
+        "exec": "$HOME/.local/bin/waybar-king-voice.sh",
+        "return-type": "json",
+        "interval": 1,
+        "signal": 8,
+        "tooltip": true,
+        "on-click": "kitty --hold --title 'King Kusaila' -e $HOME/.local/bin/king-kusaila-status"
+    },
+    "image#king": {
+        "exec": "$HOME/.local/bin/waybar-king-icon.sh",
+        "size": 24,
+        "interval": 2,
+        "signal": 9,
+        "on-click": "$HOME/.local/bin/king-repondeur toggle",
+        "on-click-right": "kitty --hold --title 'King Kusaila' -e $HOME/.local/bin/king-kusaila-status",
+        "tooltip": true
+    },
+    "custom/dnd": {
+        "exec": "if [ \"$(dunstctl is-paused)\" = \"true\" ]; then echo '󰂛'; else echo '󰂚'; fi",
+        "interval": 2,
+        "tooltip": true,
+        "tooltip-format": "Notifications — clic gauche : Do Not Disturb · clic droit : rappeler la dernière · clic milieu : tout effacer",
+        "on-click": "dunstctl set-paused toggle",
+        "on-click-right": "dunstctl history-pop",
+        "on-click-middle": "dunstctl history-clear"
+    }
+}

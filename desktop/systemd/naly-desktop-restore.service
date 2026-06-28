@@ -1,0 +1,8 @@
+[Unit]
+Description=Réinjecte les customisations desktop de naly (Waybar King+DND, glass dunst) après une régénération HyDE
+
+[Service]
+Type=oneshot
+# laisse HyDE finir sa régén avant de réinjecter
+ExecStartPre=/usr/bin/sleep 2
+ExecStart=%h/.local/bin/naly-desktop-restore
