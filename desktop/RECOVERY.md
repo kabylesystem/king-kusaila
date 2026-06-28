@@ -37,7 +37,9 @@ cp desktop/dunst/dunst.conf ~/.config/dunst/dunst.conf
 cp desktop/systemd/naly-desktop-restore.{path,service} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now naly-desktop-restore.path
-# 4. première application
+# 4. boot : double sécurité dans ~/.config/hypr/userprefs.conf
+#    exec-once = sleep 4 && /home/<user>/.local/bin/naly-desktop-restore
+# 5. première application
 ~/.local/bin/naly-desktop-restore
 ```
 
