@@ -247,20 +247,55 @@ def main() -> int:
     GLib.timeout_add(42, tick)
     GLib.idle_add(load_more)
 
+    def nav(target, extend):
+        # extend = Shift tenu -> on étend la sélection ; sinon on déplace le curseur.
+        if extend:
+            buf.move_mark(buf.get_insert(), target)
+        else:
+            buf.place_cursor(target)
+        textview.scroll_mark_onscreen(buf.get_insert())
+        return True
+
     def on_key(_w, event):
+        kv = event.keyval
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
-        if event.keyval == Gdk.KEY_Escape:
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if kv == Gdk.KEY_Escape:
             finish(None)
             return True
-        if ctrl and event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+        if ctrl and kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             return launch("interactive")
-        return False
+        # --- Navigation explicite (garantie même si le keymap GTK déconne) ---
+        ins = buf.get_iter_at_mark(buf.get_insert())
+        if kv in (Gdk.KEY_Home, Gdk.KEY_KP_Home):
+            ins = buf.get_start_iter() if ctrl else (ins.set_line_offset(0) or ins)
+            return nav(ins, shift)
+        if kv in (Gdk.KEY_End, Gdk.KEY_KP_End):
+            if ctrl:
+                ins = buf.get_end_iter()
+            elif not ins.ends_line():
+                ins.forward_to_line_end()
+            return nav(ins, shift)
+        if ctrl and kv in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
+            if not ins.backward_word_start():
+                ins = buf.get_start_iter()
+            return nav(ins, shift)
+        if ctrl and kv in (Gdk.KEY_Right, Gdk.KEY_KP_Right):
+            if not ins.forward_word_end():
+                ins = buf.get_end_iter()
+            return nav(ins, shift)
+        # Ctrl+A = tout sélectionner
+        if ctrl and kv in (Gdk.KEY_a, Gdk.KEY_A):
+            buf.select_range(buf.get_start_iter(), buf.get_end_iter())
+            return True
+        return False  # flèches simples / reste = comportement natif GTK
 
     win.connect("key-press-event", on_key)
     win.connect("destroy", lambda *_: finish(None))
     win.show_all()
     win.present()
     textview.grab_focus()
+    GLib.idle_add(textview.grab_focus)  # re-grab après mapping (focus fiable sous Hyprland)
 
     # cacher l'overlay flottant du King le temps de la saisie
     try:
