@@ -68,9 +68,14 @@ notify() {
 }
 
 slugify() {
+  # tr -c remplace TOUT le non-alphanumérique (espaces, accents ET retours à la
+  # ligne) par '-' -> garantit un slug MONO-LIGNE même pour un long prompt collé
+  # multi-ligne (sinon les \n restaient et mkdir échouait : "File name too long").
   tr '[:upper:]' '[:lower:]' |
-    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' |
-    cut -c1-48
+    tr -c 'a-z0-9' '-' |
+    sed -E 's/-+/-/g; s/^-+//; s/-+$//' |
+    cut -c1-48 |
+    sed -E 's/-+$//'
 }
 
 mission_lower() {
