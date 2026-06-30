@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# King Kusaila — annulation (Super+Q).
+# Si une mission est en cours de capture/lancement (overlay REC apres un Super+V,
+# transcription, fenetre de choix...) -> on l'ANNULE proprement (corrige un missclick).
+# Sinon -> comportement normal de Super+Q : fermer la fenetre focus (killactive).
+set -uo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila-command"
+PID_FILE="$STATE_DIR/record.pid"          # pw-record en cours (overlay REC)
+BUSY_LOCK="$STATE_DIR/busy.lock"          # toggle en phase de lancement
+AUDIO_FILE="$STATE_DIR/mission.wav"
+CHOICE_PID="$STATE_DIR/choice.pid"        # fenetre GTK de choix (background/cli)
+CHOICE_LAUNCH_PID="$STATE_DIR/choice-launch.pid"
+
+alive() { [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
+
+# Arret robuste : SIGINT (pw-record finalise son wav proprement), puis escalade
+# vers TERM/KILL si le process s'accroche -> une annulation de missclick DOIT aboutir.
+kill_hard() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 0
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in {1..20}; do alive "$pid" || return 0; sleep 0.02; done
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in {1..10}; do alive "$pid" || return 0; sleep 0.02; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
+rec_pid=""
+[[ -f "$PID_FILE" ]] && rec_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+busy_pid=""
+[[ -f "$BUSY_LOCK" ]] && busy_pid="$(cat "$BUSY_LOCK" 2>/dev/null || true)"
+choice_pid=""
+[[ -f "$CHOICE_PID" ]] && choice_pid="$(cat "$CHOICE_PID" 2>/dev/null || true)"
+
+active=0
+alive "$rec_pid"    && active=1
+alive "$busy_pid"   && active=1
+alive "$choice_pid" && active=1
+
+# Rien a annuler -> Super+Q garde son role habituel : fermer la fenetre active.
+if [[ "$active" -eq 0 ]]; then
+  exec hyprctl dispatch killactive
+fi
+
+# --- Annulation de King Kusaila ---
+kill_hard "$rec_pid"
+kill_hard "$busy_pid"
+for f in "$CHOICE_PID" "$CHOICE_LAUNCH_PID"; do
+  if [[ -f "$f" ]]; then
+    p="$(cat "$f" 2>/dev/null || true)"
+    [[ -n "$p" ]] && kill "$p" 2>/dev/null || true
+    rm -f "$f"
+  fi
+done
+
+rm -f "$PID_FILE" "$BUSY_LOCK" "$AUDIO_FILE"
+"$HOME/.local/bin/king-kusaila-visual" stop >/dev/null 2>&1 || true
+"$HOME/.local/bin/king-voice-status" idle >/dev/null 2>&1 || true
+notify-send -t 1500 "King Kusaila" "❌ Mission annulée" 2>/dev/null || true
+exit 0

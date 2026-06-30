@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""King Kusaila — boite de saisie TEXTE, dans la charte du personnage.
+
+Fenetre transparente (comme king-kusaila-choice) : le King anime a gauche,
+un panneau "verre" navy/or a droite ou l'on colle/ecrit la mission.
+- Ctrl+Entree (ou bouton Lancer) -> ecrit le texte sur stdout, exit 0.
+- Echap / Annuler / vide -> exit 130 (rien lance).
+"""
+import os
+import signal
+import sys
+from pathlib import Path
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+
+STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "king-kusaila-command"
+PID_FILE = STATE_DIR / "textbox.pid"
+FRAME_DIR = Path.home() / ".king-kusaila/assets/frames/talking"
+
+WIN_W, WIN_H = 760, 488
+# Personnage (cutout natif 560x752) — colle en bas a gauche, deborde un peu.
+CHAR_H = 430
+CHAR_W = int(CHAR_H * 560 / 752)
+CHAR_X = -18
+CHAR_Y = WIN_H - CHAR_H + 18
+# Panneau verre (zone de texte) a droite.
+PANEL_X = CHAR_W - 36
+PANEL_Y = 64
+PANEL_W = WIN_W - PANEL_X - 26
+PANEL_H = 300
+PAD = 18
+
+
+def frame_paths():
+    paths = sorted(FRAME_DIR.glob("*.png"))
+    if not paths:
+        paths = sorted((Path.home() / ".king-kusaila/assets/frames/choice").glob("*.png"))
+    return paths
+
+
+def load_frame(path):
+    pb = GdkPixbuf.Pixbuf.new_from_file(str(path))
+    return pb.scale_simple(CHAR_W, CHAR_H, GdkPixbuf.InterpType.BILINEAR)
+
+
+def rounded(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -1.5708, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    cr.arc(x + r, y + h - r, r, 1.5708, 3.14159)
+    cr.arc(x + r, y + r, r, 3.14159, 4.71239)
+    cr.close_path()
+
+
+def main() -> int:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+
+    paths = frame_paths()
+    frames = [load_frame(paths[0])] if paths else []
+    result = {"value": None}
+
+    def finish(value):
+        result["value"] = value
+        try:
+            PID_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        Gtk.main_quit()
+
+    signal.signal(signal.SIGINT, lambda *_: finish(None))
+    signal.signal(signal.SIGTERM, lambda *_: finish(None))
+
+    win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+    win.set_title("King Kusaila Text")
+    win.set_decorated(False)
+    win.set_keep_above(True)
+    win.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+    win.set_resizable(False)
+    win.set_default_size(WIN_W, WIN_H)
+    win.set_size_request(WIN_W, WIN_H)
+    win.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+    win.set_app_paintable(True)
+
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        win.set_visual(visual)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(
+        b"""
+        * { background: transparent; background-color: transparent; border: 0; box-shadow: none; }
+        .title { color: #f4e7c6; font-weight: 800; font-size: 19px;
+                 text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+        .hint  { color: #93a8cc; font-size: 12px; }
+        textview, textview text, .body text {
+            background: transparent; background-color: transparent;
+            color: #eef4ff; caret-color: #e8c06a;
+            font-family: 'JetBrainsMono Nerd Font','JetBrains Mono',monospace; font-size: 15px;
+        }
+        scrolledwindow, scrolledwindow > viewport { background: transparent; }
+        scrollbar, scrollbar slider { background: transparent; }
+        button.king-cli {
+            color: #ffffff; font-weight: 800; font-size: 14px;
+            padding: 7px 18px; border-radius: 10px;
+            background-image: linear-gradient(#e0463c,#b22b27);
+            border: 1px solid rgba(232,192,106,0.85);
+        }
+        button.king-cli:hover { background-image: linear-gradient(#f25a4f,#c8332e); }
+        button.king-bg {
+            color: #ffffff; font-weight: 800; font-size: 14px;
+            padding: 7px 18px; border-radius: 10px;
+            background-image: linear-gradient(#2b6fd6,#1d4fa8);
+            border: 1px solid rgba(232,192,106,0.85);
+        }
+        button.king-bg:hover { background-image: linear-gradient(#3a83ee,#2459bd); }
+        button.ghost {
+            color: #aeb9d2; font-size: 13px; padding: 7px 16px; border-radius: 10px;
+            background: transparent; border: 1px solid rgba(174,185,210,0.28);
+        }
+        button.ghost:hover { color: #e7edff; border-color: rgba(174,185,210,0.6); }
+        """
+    )
+    Gtk.StyleContext.add_provider_for_screen(
+        screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+    fixed = Gtk.Fixed()
+    win.add(fixed)
+
+    # --- couche fond : panneau verre dessine au cairo ---
+    bg = Gtk.DrawingArea()
+    bg.set_size_request(WIN_W, WIN_H)
+    bg.set_sensitive(False)
+
+    def draw_bg(_a, cr):
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        # ombre douce
+        rounded(cr, PANEL_X + 3, PANEL_Y + 6, PANEL_W, PANEL_H, 18)
+        cr.set_source_rgba(0, 0, 0, 0.35)
+        cr.fill()
+        # corps navy translucide
+        rounded(cr, PANEL_X, PANEL_Y, PANEL_W, PANEL_H, 18)
+        grad = cairo.LinearGradient(PANEL_X, PANEL_Y, PANEL_X, PANEL_Y + PANEL_H)
+        grad.add_color_stop_rgba(0, 0.06, 0.09, 0.18, 0.985)
+        grad.add_color_stop_rgba(1, 0.03, 0.05, 0.11, 0.995)
+        cr.set_source(grad)
+        cr.fill_preserve()
+        # liseré or
+        cr.set_source_rgba(0.85, 0.66, 0.30, 0.9)
+        cr.set_line_width(1.4)
+        cr.stroke()
+        # halo bleu interne en haut (accent glace)
+        rounded(cr, PANEL_X + 1.5, PANEL_Y + 1.5, PANEL_W - 3, PANEL_H - 3, 16)
+        cr.set_source_rgba(0.23, 0.62, 1.0, 0.10)
+        cr.set_line_width(1.0)
+        cr.stroke()
+        return False
+
+    bg.connect("draw", draw_bg)
+    fixed.put(bg, 0, 0)
+
+    # --- personnage anime ---
+    char = Gtk.Image()
+    char.set_sensitive(False)
+    if frames:
+        char.set_from_pixbuf(frames[0])
+    fixed.put(char, CHAR_X, CHAR_Y)
+
+    # --- titre ---
+    title = Gtk.Label(label="\U0001F451  Mission — King Kusaila")
+    title.get_style_context().add_class("title")
+    title.set_xalign(0.0)
+    title.set_size_request(PANEL_W, -1)
+    fixed.put(title, PANEL_X + 4, PANEL_Y - 34)
+
+    # --- zone de texte ---
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scroller.set_size_request(PANEL_W - 2 * PAD, PANEL_H - 2 * PAD)
+    textview = Gtk.TextView()
+    textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    textview.get_style_context().add_class("body")
+    textview.set_left_margin(4)
+    textview.set_right_margin(4)
+    textview.set_top_margin(2)
+    buf = textview.get_buffer()
+    scroller.add(textview)
+    fixed.put(scroller, PANEL_X + PAD, PANEL_Y + PAD)
+
+    # --- indice + boutons ---
+    hint = Gtk.Label(label="Choisis où lancer  ·  Ctrl+Entrée → CLI  ·  Échap → annuler  ·  Ctrl+V → coller")
+    hint.get_style_context().add_class("hint")
+    hint.set_xalign(0.0)
+    fixed.put(hint, PANEL_X + 4, PANEL_Y + PANEL_H + 14)
+
+    def get_text():
+        s, e = buf.get_bounds()
+        return buf.get_text(s, e, True).strip()
+
+    def launch(mode):
+        if get_text():
+            finish(mode)
+        return True
+
+    btn_cancel = Gtk.Button(label="Annuler")
+    btn_cancel.get_style_context().add_class("ghost")
+    btn_cancel.connect("clicked", lambda *_: finish(None))
+    btn_bg = Gtk.Button(label="\U0001F319  Background")
+    btn_bg.get_style_context().add_class("king-bg")
+    btn_bg.connect("clicked", lambda *_: launch("background"))
+    btn_cli = Gtk.Button(label="\U0001F5A5️  CLI")
+    btn_cli.get_style_context().add_class("king-cli")
+    btn_cli.connect("clicked", lambda *_: launch("interactive"))
+    btnbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    btnbox.pack_start(btn_cancel, False, False, 0)
+    btnbox.pack_start(btn_bg, False, False, 0)
+    btnbox.pack_start(btn_cli, False, False, 0)
+    fixed.put(btnbox, PANEL_X + PANEL_W - 360, PANEL_Y + PANEL_H + 44)
+
+    # --- animation du personnage ---
+    idx = {"v": 0}
+    load = {"next": 1}
+
+    def load_more():
+        end = min(load["next"] + 8, len(paths))
+        for p in paths[load["next"]:end]:
+            frames.append(load_frame(p))
+        load["next"] = end
+        return load["next"] < len(paths)
+
+    def tick():
+        if frames:
+            idx["v"] = (idx["v"] + 1) % len(frames)
+            char.set_from_pixbuf(frames[idx["v"]])
+        return True
+
+    GLib.timeout_add(42, tick)
+    GLib.idle_add(load_more)
+
+    def on_key(_w, event):
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        if event.keyval == Gdk.KEY_Escape:
+            finish(None)
+            return True
+        if ctrl and event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return launch("interactive")
+        return False
+
+    win.connect("key-press-event", on_key)
+    win.connect("destroy", lambda *_: finish(None))
+    win.show_all()
+    win.present()
+    textview.grab_focus()
+
+    # cacher l'overlay flottant du King le temps de la saisie
+    try:
+        import subprocess
+        subprocess.Popen(
+            [str(Path.home() / ".local/bin/king-kusaila-visual"), "hide"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+    Gtk.main()
+
+    if result["value"] in ("interactive", "background"):
+        s, e = buf.get_bounds()
+        text = buf.get_text(s, e, True).strip()
+        if text:
+            # 1re ligne = mode choisi, le reste = la mission (multi-ligne possible).
+            sys.stdout.write(result["value"] + "\n" + text)
+            return 0
+    return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -9,8 +9,10 @@ L'opérateur IA vocal local du laptop (CachyOS / Hyprland). Pas un chat : un **J
 |-----------|------|
 | **`Super+C`** | **Dictée** vocale globale → transcrit (gpt-4o-transcribe) et tape le texte dans la fenêtre active + journalise. Qualité quasi instantanée, anti-hallucination. |
 | **`Super+V`** | **Mission** vocale → King apparaît, tu parles une tâche, il transcrit, puis lance Claude Code en **background** (silencieux) ou **CLI** (terminal visible). |
+| **`Super+Shift+V`** | **Mission par texte** → boîte King (perso animé) paste-friendly pour les longs prompts, avec cartes **CLI / Background** ; même pipeline que la voix. |
+| **`Super+Q`** | **Annuler** un King en cours (corrige un missclick) ; sinon ferme la fenêtre focus. |
 
-Toggle : 1er appui = enregistre, 2e appui = stoppe et lance.
+Toggle vocal : 1er appui = enregistre, 2e appui = stoppe et lance. Détails texte/annulation : [docs/MISSION-TEXTE.md](docs/MISSION-TEXTE.md).
 
 ## Architecture (5 couches)
 

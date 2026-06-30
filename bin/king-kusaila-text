@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# King Kusaila — mission par TEXTE (Super+Shift+V).
+# Ouvre une boite multi-ligne editable (paste-friendly, pour les longs prompts),
+# puis envoie le texte dans la MEME pipeline que la voix (king-kusaila-toggle --text):
+# inference du mode -> choix CLI/background -> lancement.
+set -uo pipefail
+
+SELF_DIR="$HOME/.local/bin"
+
+# Capturer le moniteur ACTIF maintenant (au moment du raccourci Super+Shift+V,
+# l'utilisateur y est) pour que la fenetre CLI s'ouvre SUR SON ECRAN, pas ailleurs.
+LAUNCH_MON="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' 2>/dev/null | head -n1 || true)"
+
+mission=""
+text_mode=""
+if [[ -x "$SELF_DIR/king-kusaila-textbox" ]] && command -v python3 >/dev/null 2>&1; then
+  # Boite custom dans la charte King (perso anime + cartes CLI/Background), paste-friendly.
+  # Sortie : 1re ligne = mode choisi (interactive|background), le reste = la mission.
+  out="$("$SELF_DIR/king-kusaila-textbox" 2>/dev/null)" || exit 0
+  text_mode="$(printf '%s' "$out" | head -n 1)"
+  mission="$(printf '%s' "$out" | tail -n +2)"
+elif command -v zenity >/dev/null 2>&1; then
+  # Repli : boite GTK standard multi-ligne.
+  mission="$(
+    zenity --text-info --editable \
+      --title="King Kusaila — mission (texte)" \
+      --width=760 --height=440 \
+      --ok-label="Lancer 👑" \
+      --cancel-label="Annuler" \
+      2>/dev/null
+  )" || exit 0
+elif command -v rofi >/dev/null 2>&1; then
+  # Repli : prompt rofi mono-ligne (colle quand meme avec Ctrl+V).
+  mission="$(printf '' | rofi -dmenu -p "KING KUSAILA" 2>/dev/null)" || exit 0
+else
+  notify-send -u critical "King Kusaila" "Aucun outil de saisie (zenity/rofi) trouve." 2>/dev/null || true
+  exit 1
+fi
+
+# Trim espaces/lignes vides en bord.
+mission="$(printf '%s' "$mission" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[[ -z "$mission" ]] && exit 0
+
+# Reutilise toute la logique existante (mutex, job, lancement).
+# Si un mode a ete choisi dans la boite (cartes CLI/Background) -> on le force.
+if [[ "$text_mode" == "interactive" || "$text_mode" == "background" ]]; then
+  exec "$SELF_DIR/king-kusaila-toggle" --text --mon "$LAUNCH_MON" --mode "$text_mode" "$mission"
+else
+  exec "$SELF_DIR/king-kusaila-toggle" --text --mon "$LAUNCH_MON" "$mission"
+fi

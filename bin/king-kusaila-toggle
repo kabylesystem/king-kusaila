@@ -105,7 +105,9 @@ project_slug_from_mission() {
     tr '[:upper:]' '[:lower:]' |
     sed -E 's/[^a-z0-9]+/\n/g' |
     grep -Ev '^(a|ai|alors|an|and|app|application|avec|background|bg|build|ca|code|claude|create|creer|cree|crée|dans|de|des|du|en|faire|fais|fait|for|genre|interactif|interactive|je|la|le|les|lance|ma|me|mes|mode|moi|mon|new|notes|nouveau|nouvelle|peux|peut|pour|projet|range|saas|site|stp|sur|the|to|tu|un|une|veux|with)$' |
-    head -n 1 || true
+    grep -E '^.{2,}$' |
+    head -n 2 |
+    paste -sd '-' - || true
   )"
 
   printf '%s\n' "${cleaned:-project}"
@@ -266,44 +268,13 @@ finish_choice_async() {
   esac
 }
 
-# MUTEX: tant qu'une mission est en train de se lancer (transcription / choix /
-# ouverture), on IGNORE tout nouvel appui -> jamais deux King superposes.
-if [[ -f "$BUSY_LOCK" ]]; then
-  busy_pid="$(cat "$BUSY_LOCK" 2>/dev/null || true)"
-  if [[ -n "$busy_pid" ]] && kill -0 "$busy_pid" 2>/dev/null; then
-    exit 0
+launch_mission() {
+  local mission="$1"
+  local launch_mon="${2:-}"
+  local forced_mode="${3:-}"   # interactive|background ; vide = inference/choix
+  if [[ -z "$launch_mon" ]]; then
+    launch_mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' 2>/dev/null | head -n1 || true)"
   fi
-  rm -f "$BUSY_LOCK"   # lock perime (process mort) -> on nettoie
-fi
-
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  pid="$(cat "$PID_FILE")"
-  # On verrouille des l'arret: toute la phase lancement est protegee.
-  printf '%s\n' "$$" > "$BUSY_LOCK"
-  trap 'rm -f "$BUSY_LOCK"' EXIT
-  # Capturer le moniteur focus MAINTENANT (l'utilisateur y est), avant que
-  # l'overlay / la fenetre de choix ne deplacent le focus -> l'ecran courant.
-  launch_mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' 2>/dev/null | head -n1 || true)"
-  kill -INT "$pid" 2>/dev/null || true
-  for _ in {1..40}; do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.025
-  done
-  rm -f "$PID_FILE"
-  restore_bluetooth_hifi &  # async : ne pas retarder l'ASR
-
-  "$HOME/.local/bin/king-voice-status" transcribing "ASR"
-  stop_choice_async
-  if ! mission="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE")"; then
-    notify "TRANSCRIPTION FAILED" "err"
-    exit 1
-  fi
-
-  if [[ -z "${mission//[[:space:]]/}" ]]; then
-    notify "NO MISSION DETECTED" "err"
-    exit 0
-  fi
-
   stamp="$(date '+%Y%m%d-%H%M%S')"
   slug="$(printf '%s' "$mission" | slugify)"
   [[ -n "$slug" ]] || slug="mission"
@@ -330,12 +301,18 @@ Work like a serious autonomous engineering agent:
 - In background mode, do the work without waiting for more user chat unless impossible.
 SYSTEM
 
-  "$HOME/.local/bin/king-voice-status" king "MODE"
-  mode="$(infer_mode "$mission")"
-  if [[ "$mode" == "ask" ]]; then
-    mode="$(choose_mode "$mission")"
-  else
+  if [[ "$forced_mode" == "interactive" || "$forced_mode" == "background" ]]; then
+    # Mode deja choisi (cartes de la boite texte) -> on saute infer/choix.
+    mode="$forced_mode"
     stop_choice_async
+  else
+    "$HOME/.local/bin/king-voice-status" king "MODE"
+    mode="$(infer_mode "$mission")"
+    if [[ "$mode" == "ask" ]]; then
+      mode="$(choose_mode "$mission")"
+    else
+      stop_choice_async
+    fi
   fi
   "$HOME/.local/bin/king-kusaila-visual" stop
   printf '%s\n' "$mode" > "$job/mode.txt"
@@ -500,6 +477,70 @@ RUN
   else
     "$job/run-background.sh" &
   fi
+}
+
+# MUTEX: tant qu'une mission est en train de se lancer (transcription / choix /
+# ouverture), on IGNORE tout nouvel appui -> jamais deux King superposes.
+if [[ -f "$BUSY_LOCK" ]]; then
+  busy_pid="$(cat "$BUSY_LOCK" 2>/dev/null || true)"
+  if [[ -n "$busy_pid" ]] && kill -0 "$busy_pid" 2>/dev/null; then
+    exit 0
+  fi
+  rm -f "$BUSY_LOCK"   # lock perime (process mort) -> on nettoie
+fi
+
+# TEXTE: mission fournie directement (Super+Shift+V -> king-kusaila-text).
+# On saute l'enregistrement vocal et on lance la meme pipeline.
+if [[ "${1:-}" == "--text" ]]; then
+  shift
+  text_mode=""
+  text_mon=""
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --mode) text_mode="${2:-}"; shift 2 ;;
+      --mon)  text_mon="${2:-}";  shift 2 ;;
+      *) break ;;
+    esac
+  done
+  mission="${1:-}"
+  if [[ -z "${mission//[[:space:]]/}" ]]; then
+    exit 0
+  fi
+  printf '%s\n' "$$" > "$BUSY_LOCK"
+  trap 'rm -f "$BUSY_LOCK"' EXIT
+  launch_mission "$mission" "$text_mon" "$text_mode"
+  exit 0
+fi
+
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  pid="$(cat "$PID_FILE")"
+  # On verrouille des l'arret: toute la phase lancement est protegee.
+  printf '%s\n' "$$" > "$BUSY_LOCK"
+  trap 'rm -f "$BUSY_LOCK"' EXIT
+  # Capturer le moniteur focus MAINTENANT (l'utilisateur y est), avant que
+  # l'overlay / la fenetre de choix ne deplacent le focus -> l'ecran courant.
+  launch_mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused==true) | .name' 2>/dev/null | head -n1 || true)"
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in {1..40}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.025
+  done
+  rm -f "$PID_FILE"
+  restore_bluetooth_hifi &  # async : ne pas retarder l'ASR
+
+  "$HOME/.local/bin/king-voice-status" transcribing "ASR"
+  stop_choice_async
+  if ! mission="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE")"; then
+    notify "TRANSCRIPTION FAILED" "err"
+    exit 1
+  fi
+
+  if [[ -z "${mission//[[:space:]]/}" ]]; then
+    notify "NO MISSION DETECTED" "err"
+    exit 0
+  fi
+
+  launch_mission "$mission" "$launch_mon"
 
   exit 0
 fi
