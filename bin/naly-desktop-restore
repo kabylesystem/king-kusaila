@@ -21,14 +21,10 @@ if [[ -f "$CFG" ]] && ! grep -q 'custom/king-voice' "$CFG" 2>/dev/null; then
   if [[ -f "$LAYOUT" ]]; then
     cp -f "$LAYOUT" "$CFG"
     log "King + DND réinjectés dans config.jsonc"
-    killall waybar 2>/dev/null || true
-    sleep 1
-    # relance via le compositeur (il possède le process → survit), sinon fallback
-    if command -v hyprctl >/dev/null 2>&1 && hyprctl dispatch exec waybar >/dev/null 2>&1; then
-      :
-    else
-      setsid -f waybar >/dev/null 2>&1 || true
-    fi
+    # Recharge la waybar EXISTANTE (SIGUSR2 = reload config in-place) au lieu d'en
+    # relancer une 2e. HyDE garde la propriété du process (hyde-Hyprland-bar.service)
+    # → plus jamais de double barre au boot.
+    killall -SIGUSR2 waybar 2>/dev/null || true
     did=1
   else
     log "ERREUR : layout canonique introuvable ($LAYOUT)"
