@@ -8,8 +8,19 @@ mkdir -p "$STATE_DIR" "$NOTES_DIR"
 
 PID_FILE="$STATE_DIR/record.pid"
 AUDIO_FILE="$STATE_DIR/input.wav"
+LOCK_FILE="$STATE_DIR/toggle.lock"
 KING_COMMAND_STATE="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila-command"
 KING_CHOICE_PID="$KING_COMMAND_STATE/choice.pid"
+
+# --- VERROU anti-race : une seule instance de toggle à la fois ---------------
+# Sans ça, un double-appui ou un appui PENDANT la transcription part en vrille
+# (double enregistrement, stop qui rate...). flock -n => si une instance tient
+# déjà le verrou, on ignore l'appui (pas de file d'attente parasite).
+# IMPORTANT : pw-record est lancé en arrière-plan et HÉRITERAIT du fd 9 (donc du
+# verrou) -> on ferme le fd pour les enfants (9>&-), sinon le lock resterait tenu
+# pendant tout l'enregistrement et le 2e appui (stop) ne passerait jamais.
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
 
 record_source() {
   if [[ -n "${KING_RECORD_SOURCE:-}" ]]; then
@@ -27,17 +38,18 @@ restore_bluetooth_hifi() {
 start_recording() {
   local source=""
   source="$(record_source)"
-  # Lancer pw-record TOUT DE SUITE : ne pas bloquer le debut de la phrase sur
-  # le switch de profil Bluetooth (qui peut prendre plusieurs secondes).
+  # Lancer pw-record TOUT DE SUITE ; 9>&- ferme le fd du verrou pour l'enfant
+  # (sinon il tient le lock et bloque le stop).
   if [[ -n "$source" ]]; then
-    pw-record --target "$source" --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+    pw-record --target "$source" --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
   else
-    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
   fi
   echo "$!" > "$PID_FILE"
-  restore_bluetooth_hifi &  # async : ne touche que la sortie BT, pas le mic
+  restore_bluetooth_hifi 9>&- &  # async : ne touche que la sortie BT, pas le mic
 }
 
+# Super+C ferme la fenêtre de choix King si elle est ouverte (geste d'échappement).
 if [[ -f "$KING_CHOICE_PID" ]] && kill -0 "$(cat "$KING_CHOICE_PID")" 2>/dev/null; then
   kill -TERM "$(cat "$KING_CHOICE_PID")" 2>/dev/null || true
   "$HOME/.local/bin/king-voice-status" idle
@@ -58,15 +70,22 @@ active_window() {
   hyprctl activewindow -j 2>/dev/null | jq -r '[.class, .title] | map(select(. != null and . != "")) | join(" - ")' 2>/dev/null || true
 }
 
+# ====================== STOP : il y a un enregistrement en cours ==============
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   pid="$(cat "$PID_FILE")"
+  # SIGINT : pw-record finalise proprement le .wav. Escalade si ça s'accroche.
   kill -INT "$pid" 2>/dev/null || true
   for _ in {1..40}; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.025
   done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..10}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.02; done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   rm -f "$PID_FILE"
-  restore_bluetooth_hifi &  # async : ne pas retarder la transcription
+  restore_bluetooth_hifi 9>&- &  # async : ne pas retarder la transcription
 
   notify "TRANSCRIBING..." "info"
   if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE")"; then
@@ -79,8 +98,12 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     exit 0
   fi
 
-  printf '%s' "$text" | wl-copy
-  wtype "$text" 2>/dev/null || true
+  # On TAPE le texte dans la fenêtre active via clavier virtuel.
+  # NB: on NE TOUCHE PLUS au presse-papier (avant: wl-copy l'écrasait) -> ton
+  # presse-papier reste intact.
+  if ! wtype "$text" 2>/dev/null; then
+    notify "TYPED FAILED - voir la note du jour" "err"
+  fi
 
   note="$NOTES_DIR/$(date +%F).md"
   {
@@ -90,10 +113,12 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     printf '%s\n' "$text"
   } >> "$note"
 
-  notify "DONE - typed and copied" "ok"
+  notify "DONE - tapé (presse-papier préservé)" "ok"
   exit 0
 fi
 
+# ====================== START : démarrer un enregistrement ====================
 rm -f "$AUDIO_FILE"
-notify "REC - press Super+C again to stop" "rec"
-start_recording
+start_recording                                  # capturer le son AVANT le reste
+notify "REC - press Super+C again to stop" "rec" # feedback ensuite (latence minimale)
+exit 0
