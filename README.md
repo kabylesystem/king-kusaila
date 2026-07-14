@@ -1,62 +1,52 @@
-# 👑 King Kusaila
+# king kusaila
 
-L'opérateur IA vocal local du laptop (CachyOS / Hyprland). Pas un chat : un **Jarvis** qui
-écoute, comprend, et **fait** — en lançant Claude Code avec autonomie maximale.
+A laptop operated by voice. Not a chat window: an operator that listens, understands, and **acts**, by handing the machine to Claude Code with full autonomy.
 
-## Les deux gestes
+Named after Kusaila, the Amazigh king who resisted an empire.
 
-| Raccourci | Rôle |
+## The two gestures
+
+| Shortcut | What it does |
 |-----------|------|
-| **`Super+C`** | **Dictée** vocale globale → transcrit (gpt-4o-transcribe) et tape le texte dans la fenêtre active + journalise. **Presse-papier préservé** (ne l'écrase plus), verrou anti-race (start/stop déterministes). |
-| **`Super+V`** | **Mission** vocale → King apparaît, tu parles une tâche, il transcrit, puis lance Claude Code en **background** (silencieux) ou **CLI** (terminal visible). |
-| **`Super+Shift+V`** | **Mission par texte** → boîte King (perso animé) paste-friendly pour les longs prompts, avec cartes **CLI / Background** ; même pipeline que la voix. |
-| **`Super+Q`** | **Annuler** un King en cours (corrige un missclick) ; sinon ferme la fenêtre focus. |
+| **`Super+C`** | **Dictation** anywhere: records, transcribes (gpt-4o-transcribe), types the text into the focused window. Clipboard is preserved, start/stop is deterministic. |
+| **`Super+V`** | **Voice mission**: you speak a task, it transcribes, then launches Claude Code either in the background (silent, notifies you when done) or in a visible terminal. |
+| **`Super+Shift+V`** | **Text mission**: same pipeline, paste-friendly, for long prompts. |
+| **`Super+Q`** | **Cancel** a running mission. |
 
-Toggle vocal : 1er appui = enregistre, 2e appui = stoppe et lance. Détails texte/annulation : [docs/MISSION-TEXTE.md](docs/MISSION-TEXTE.md).
+Recording is a toggle: press once to start, press again to stop and run.
 
-## Architecture (5 couches)
+## Architecture
 
 ```
-A. Hotkeys Hyprland     userprefs.conf  ->  Super+C / Super+V
-B. Capture audio        pw-record (mic interne, anti-clipping)
-C. ASR                  voice-transcribe -> OpenAI gpt-4o-transcribe (+ fallback whisper.cpp local)
-                        gate anti-hallucination (silence/clip -> rien tapé) + garde anti-écho
-D. UX visuelle          king-kusaila-visuald (avatar overlay GTK layer-shell, daemon chaud)
-                        king-kusaila-choice (chooser background/CLI, auto-dismiss 10s)
-                        king-voice-status -> Waybar
-E. Exécution agent      king-kusaila-toggle -> job durable -> claude (bypass permissions)
-                        background = claude --print + notifs ; CLI = kitty sur l'écran courant
+A. Hotkeys          Hyprland userprefs.conf -> Super+C / Super+V
+B. Audio capture    pw-record (internal mic, anti-clipping)
+C. Speech to text   OpenAI gpt-4o-transcribe, with a local whisper.cpp fallback
+                    anti-hallucination gate: silence or clipping types nothing
+D. Visual layer     GTK layer-shell avatar overlay, a background/CLI chooser, Waybar status
+E. Agent execution  a durable job -> claude, background (--print + notifications) or visible terminal
 ```
 
-Chaque mission crée un **job durable** dans `~/.king-kusaila/jobs/<date>-<slug>/`
-(`mission.txt`, `STATUS.md`, `claude.log`, `FINAL.md` = le rapport).
+Every mission creates a durable job in `~/.king-kusaila/jobs/<date>-<slug>/` containing the mission, its status, the full log, and a final report.
 
-## Installation
+## Install
 
 ```bash
-./install.sh                       # symlink bin/* -> ~/.local/bin (backup si existant)
-cp config/openai.env.example ~/.config/king-kusaila/openai.env && chmod 600 ~/.config/king-kusaila/openai.env
-# -> remplir OPENAI_API_KEY
+./install.sh                       # symlinks bin/* into ~/.local/bin
+cp config/openai.env.example ~/.config/king-kusaila/openai.env
+chmod 600 ~/.config/king-kusaila/openai.env      # then fill in OPENAI_API_KEY
 cat hypr/userprefs-king.conf >> ~/.config/hypr/userprefs.conf && hyprctl reload
 ```
 
-Dépendances : `pipewire` (pw-record), `wtype`, `wl-clipboard`, `jq`, `ffmpeg`, `python-gobject`
-+ `gtk3` + `gtk-layer-shell`, `dunst`, `whisper.cpp` (fallback), `claude` (Claude Code).
+Dependencies: `pipewire` (pw-record), `wtype`, `wl-clipboard`, `jq`, `ffmpeg`, `python-gobject`, `gtk3`, `gtk-layer-shell`, `dunst`, `whisper.cpp` (fallback), and `claude` (Claude Code).
 
-## Réglages (env, optionnels)
+Built for CachyOS and Hyprland; the pieces are small enough to port elsewhere.
 
-`KING_MIN_AUDIO_SEC` (0.35) · `KING_MIN_PEAK_DB` (-40) · `KING_CHOICE_TIMEOUT` (10) ·
-`KING_OPENAI_TRANSCRIBE_MODEL` · `KING_RECORD_SOURCE` · `KING_TRANSCRIBE_BACKEND=local`.
+## Settings
 
-## Vision / roadmap — King qui FAIT
+Optional environment variables: `KING_MIN_AUDIO_SEC` (0.35), `KING_MIN_PEAK_DB` (-40), `KING_CHOICE_TIMEOUT` (10), `KING_OPENAI_TRANSCRIBE_MODEL`, `KING_RECORD_SOURCE`, `KING_TRANSCRIBE_BACKEND=local`.
 
-Le but : un opérateur qui agit dans le monde réel. Tout ce que King peut scripter, il peut le faire.
+## Why
 
-- [x] **Fichiers** (`~/future/saas`, le système) — déjà, via bash + bypass.
-- [x] **Anki** — via AnkiConnect (`~/.local/bin/anki-add.py`).
-- [x] **Brave / web** — via Playwright (déjà installé).
-- [ ] **Signal** — à câbler : `signal-cli` lié au compte → `king-notify-signal`.
-- [ ] **Mail** — à câbler : `msmtp` + app password Gmail → `king-send-mail`.
-- [ ] Rapport de fin enrichi (notif + résumé) — en place côté background.
+I wanted to know what it feels like when the computer actually listens, instead of waiting for someone to sell that feeling to me.
 
-> Détail complet du chantier et de l'historique : [`docs/kusaila-boss.md`](docs/kusaila-boss.md).
+More on [nabtiylan.com](https://nabtiylan.com/projects/king-kusaila).
