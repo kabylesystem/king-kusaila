@@ -9,6 +9,7 @@ mkdir -p "$STATE_DIR" "$NOTES_DIR"
 PID_FILE="$STATE_DIR/record.pid"
 AUDIO_FILE="$STATE_DIR/input.wav"
 LOCK_FILE="$STATE_DIR/toggle.lock"
+TARGET_FILE="$STATE_DIR/target-window"   # JSON hyprctl de la fenêtre où la dictée a commencé (adresse + classe + titre)
 KING_COMMAND_STATE="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila-command"
 KING_CHOICE_PID="$KING_COMMAND_STATE/choice.pid"
 
@@ -70,6 +71,153 @@ active_window() {
   hyprctl activewindow -j 2>/dev/null | jq -r '[.class, .title] | map(select(. != null and . != "")) | join(" - ")' 2>/dev/null || true
 }
 
+# Titres égaux "à la volatilité près" : on ignore les compteurs de non-lus
+# "(3)", les caractères invisibles (isolats bidi de Telegram) et les espaces
+# multiples — sinon un simple message reçu pendant l'absence bloquerait tout.
+title_match() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys, unicodedata
+def norm(s):
+    s = re.sub(r"\(\d+\)", "", s)
+    s = "".join(c for c in s if unicodedata.category(c) not in ("Cf", "Cc"))
+    return re.sub(r"\s+", " ", s).strip()
+sys.exit(0 if norm(sys.argv[1]) == norm(sys.argv[2]) else 1)
+PY
+}
+
+# Attend (en arrière-plan) que la fenêtre d'origine reprenne le focus — ET, si
+# un titre est exigé, que le bon onglet/la bonne conversation soit re-affiché —
+# puis tape. Pourquoi : wtype (clavier virtuel Wayland) ne parle QU'À la fenêtre
+# focusée, et une fenêtre non focusée n'a même pas le droit de lire le
+# presse-papier (règle Wayland) -> taper "en arrière-plan" est physiquement
+# impossible. Donc ni vol de focus ni presse-papier : on guette les événements
+# Hyprland (socket2) et on tape à l'instant où naly REVIENT au bon endroit (il
+# doit y revenir de toute façon, ne serait-ce que pour appuyer sur Entrée).
+# 15 min max ; le texte est de toute façon archivé dans la note du jour.
+queue_for_window() {
+  local target="$1" text="$2" want_title="${3:-}" short="${1#0x}"
+  if python3 - "$short" "$want_title" <<'PY'
+import json, os, re, socket, subprocess, sys, time, unicodedata
+
+short, want_title = sys.argv[1], sys.argv[2]
+
+def norm(s):
+    s = re.sub(r"\(\d+\)", "", s)
+    s = "".join(c for c in s if unicodedata.category(c) not in ("Cf", "Cc"))
+    return re.sub(r"\s+", " ", s).strip()
+
+def focused_on_target():
+    # Vérité terrain (pas juste l'événement) : la cible a le focus ET, si
+    # exigé, le bon titre (= bon onglet navigateur / bonne conversation chat).
+    try:
+        aw = json.loads(subprocess.run(["hyprctl", "activewindow", "-j"],
+                                       capture_output=True, text=True, timeout=2).stdout or "{}")
+    except Exception:
+        return False
+    if aw.get("address", "") != "0x" + short:
+        return False
+    return not want_title or norm(aw.get("title", "")) == norm(want_title)
+
+base = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "hypr")
+sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+if not sig:
+    cands = sorted(os.listdir(base), key=lambda d: os.path.getmtime(os.path.join(base, d)), reverse=True)
+    sig = next(d for d in cands if os.path.exists(os.path.join(base, d, ".socket2.sock")))
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.path.join(base, sig, ".socket2.sock"))
+s.settimeout(5)
+# Anti-race 1 : la cible a pu FERMER pendant qu'on démarrait -> son closewindow
+# est déjà passé et on attendrait un fantôme 15 min. Vérifier APRÈS la connexion
+# (fermée avant = vue ici ; fermée après = on aura l'événement).
+try:
+    cl = json.loads(subprocess.run(["hyprctl", "clients", "-j"],
+                                   capture_output=True, text=True, timeout=2).stdout or "[]")
+    if not any(c.get("address") == "0x" + short for c in cl):
+        sys.exit(1)
+except Exception:
+    pass  # doute -> on continue, le timeout de 15 min couvre
+# Anti-race 2 : naly a pu revenir au bon endroit entre le check du script et ici.
+if focused_on_target():
+    sys.exit(0)
+deadline = time.time() + 900
+buf = b""
+while time.time() < deadline:
+    try:
+        chunk = s.recv(4096)
+    except socket.timeout:
+        continue
+    if not chunk:
+        sys.exit(1)
+    buf += chunk
+    *lines, buf = buf.split(b"\n")
+    for raw in lines:
+        line = raw.decode(errors="replace")
+        ev, _, data = line.partition(">>")
+        if ev == "activewindowv2" and data.strip() == short and focused_on_target():
+            sys.exit(0)          # focus revenu (au bon titre si exigé) -> on tape
+        # Bon onglet/conversation re-sélectionné SANS changer de fenêtre :
+        # seul le titre bouge, pas le focus -> écouter aussi ces événements.
+        if want_title and ev in ("windowtitle", "windowtitlev2") \
+           and data.split(",", 1)[0].strip() == short and focused_on_target():
+            sys.exit(0)
+        if ev == "closewindow" and data.strip() == short:
+            sys.exit(1)          # fenêtre fermée -> abandon (note du jour = backup)
+sys.exit(1)                      # timeout -> abandon silencieux
+PY
+  then
+    # flock : si 2 dictées attendent la même fenêtre, elles tapent l'une après l'autre.
+    (
+      flock 8
+      sleep 0.15   # laisser le focus se poser avant le clavier virtuel
+      if deliver_text "$target" "$text" "$want_title"; then
+        "$HOME/.local/bin/king-voice-status" done "DICTÉE TAPÉE" || true
+      fi
+    ) 8>"$STATE_DIR/deliver-$short.lock"
+  fi
+}
+
+# Tape le texte par TRANCHES de 40 caractères en re-vérifiant le focus entre
+# chaque : si naly quitte la fenêtre (ou l'onglet/la conversation) EN PLEIN
+# MILIEU de la frappe, on stoppe net et le RESTE part en file d'attente
+# (queue_for_window) -> il se tapera tout seul à son retour. Sans ça, le clavier
+# virtuel Wayland suivait le focus et la fin de la dictée partait dans la
+# mauvaise fenêtre (ou nulle part).
+deliver_text() {
+  local target="$1" text="$2" want_title="${3:-}"
+  local i=0 len=${#text} cur_json cur cur_title fails=0
+  dlog() { printf '%s deliver[%s] %s\n' "$(date +%T)" "${target: -6}" "$*" >> "$STATE_DIR/dictate.log" 2>/dev/null || true; }
+  dlog "start len=$len"
+  while (( i < len )); do
+    cur_json="$(hyprctl activewindow -j 2>/dev/null || true)"
+    cur="$(jq -r '.address // empty' <<<"$cur_json" 2>/dev/null || true)"
+    cur_title="$(jq -r '.title // ""' <<<"$cur_json" 2>/dev/null || true)"
+    if [[ "$cur" != "$target" ]] ||
+       { [[ -n "$want_title" && "$cur_title" != "$want_title" ]] && ! title_match "$cur_title" "$want_title"; }; then
+      dlog "focus perdu a i=$i -> re-queue du reste"
+      queue_for_window "$target" "${text:i}" "$want_title" </dev/null >/dev/null 2>&1 9>&- &
+      "$HOME/.local/bin/king-voice-status" done "SUITE EN ATTENTE - reviens sur le champ" || true
+      return 0
+    fi
+    if ! wtype -- "${text:i:40}" 2>>"$STATE_DIR/dictate.log"; then
+      # wtype rate parfois transitoirement : on retente une fois, puis on met
+      # le RESTE en file (jamais de texte perdu).
+      fails=$((fails + 1))
+      dlog "wtype echec #$fails a i=$i"
+      if (( fails >= 2 )); then
+        queue_for_window "$target" "${text:i}" "$want_title" </dev/null >/dev/null 2>&1 9>&- &
+        "$HOME/.local/bin/king-voice-status" error "FRAPPE INTERROMPUE - suite en attente" || true
+        return 1
+      fi
+      sleep 0.2
+      continue
+    fi
+    fails=0
+    i=$((i + 40))
+  done
+  dlog "fini"
+  return 0
+}
+
 # ====================== STOP : il y a un enregistrement en cours ==============
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   pid="$(cat "$PID_FILE")"
@@ -98,11 +246,44 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     exit 0
   fi
 
-  # On TAPE le texte dans la fenêtre active via clavier virtuel.
-  # NB: on NE TOUCHE PLUS au presse-papier (avant: wl-copy l'écrasait) -> ton
-  # presse-papier reste intact.
-  if ! wtype "$text" 2>/dev/null; then
-    notify "TYPED FAILED - voir la note du jour" "err"
+  # Le texte va dans le CONTEXTE où la dictée a COMMENCÉ (capturé au start) :
+  # la fenêtre, ET pour tout sauf les terminaux, le titre — car même fenêtre
+  # peut = autre onglet (navigateur) ou autre conversation (Telegram...), et là
+  # taper serait une catastrophe (mauvais champ, voire mauvais destinataire).
+  # Les terminaux sont ciblés à l'adresse seule : leur titre bouge tout seul
+  # (spinner Claude Code) et ils n'ont qu'un seul champ de saisie.
+  # Cas normal (naly n'a pas bougé) -> on tape direct. Sinon -> ni vol de focus
+  # ni presse-papier : queue_for_window guette le retour au bon endroit.
+  # Cible disparue -> fallback fenêtre active (comportement historique).
+  # NB: on NE TOUCHE JAMAIS au presse-papier -> il reste intact.
+  target_json="$(cat "$TARGET_FILE" 2>/dev/null || true)"
+  rm -f "$TARGET_FILE"
+  target="$(jq -r '.address // empty' <<<"$target_json" 2>/dev/null || true)"
+  t_class="$(jq -r '.class // empty' <<<"$target_json" 2>/dev/null || true)"
+  t_title="$(jq -r '.title // empty' <<<"$target_json" 2>/dev/null || true)"
+  cur_json="$(hyprctl activewindow -j 2>/dev/null || true)"
+  current="$(jq -r '.address // empty' <<<"$cur_json" 2>/dev/null || true)"
+  cur_title="$(jq -r '.title // empty' <<<"$cur_json" 2>/dev/null || true)"
+
+  guard_title=""
+  case "$t_class" in
+    kitty|foot|Alacritty|alacritty|org.wezfurlong.wezterm|com.mitchellh.ghostty|"") ;;
+    *) guard_title="$t_title" ;;
+  esac
+
+  queued=0
+  if [[ -z "$target" ]] ||
+     ! hyprctl clients -j 2>/dev/null | jq -e --arg a "$target" 'any(.[]; .address == $a)' >/dev/null 2>&1; then
+    if ! wtype "$text" 2>/dev/null; then
+      notify "TYPED FAILED - voir la note du jour" "err"
+    fi
+  elif [[ "$target" == "$current" ]] && { [[ -z "$guard_title" ]] || title_match "$cur_title" "$guard_title"; }; then
+    if ! deliver_text "$target" "$text" "$guard_title"; then
+      notify "TYPED FAILED - voir la note du jour" "err"
+    fi
+  else
+    queue_for_window "$target" "$text" "$guard_title" </dev/null >/dev/null 2>&1 9>&- &
+    queued=1
   fi
 
   note="$NOTES_DIR/$(date +%F).md"
@@ -113,12 +294,19 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     printf '%s\n' "$text"
   } >> "$note"
 
-  notify "DONE - tapé (presse-papier préservé)" "ok"
+  if [[ "$queued" == 1 ]]; then
+    notify "PRET - se tapera au retour sur le champ d'origine" "ok"
+  else
+    notify "DONE - tapé (presse-papier préservé)" "ok"
+  fi
   exit 0
 fi
 
 # ====================== START : démarrer un enregistrement ====================
 rm -f "$AUDIO_FILE"
 start_recording                                  # capturer le son AVANT le reste
+# Mémoriser OÙ la dictée commence (fenêtre + classe + titre) : c'est LÀ que le
+# texte sera tapé au stop, même si naly est parti ailleurs entre-temps.
+hyprctl activewindow -j 2>/dev/null > "$TARGET_FILE" || true
 notify "REC - press Super+C again to stop" "rec" # feedback ensuite (latence minimale)
 exit 0

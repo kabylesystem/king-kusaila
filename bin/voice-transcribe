@@ -66,6 +66,32 @@ transcribe() {
 
 raw="$(transcribe || true)"
 
+# ---- Gate langue: naly ne parle QUE français/anglais --------------------------
+# whisper.cpp (--language auto) et l'API OpenAI detectent parmi ~99 langues et
+# hallucinent parfois du texte dans une langue totalement etrangere (coreen,
+# arabe, cyrillique...) sur un clip court/ambigu. Ni whisper.cpp ni l'API n'ont
+# de flag "limite a un sous-ensemble de langues" -> on filtre le RESULTAT: si
+# une part significative des lettres n'est pas latine (fr/en/accents), c'est
+# une hallucination de langue -> rejet, comme le silence (rien tape > du charabia).
+if [[ -n "${raw//[[:space:]]/}" ]] && command -v python3 >/dev/null 2>&1; then
+  if ! printf '%s' "$raw" | python3 -c '
+import sys, unicodedata
+text = sys.stdin.read()
+letters = [c for c in text if c.isalpha()]
+if not letters:
+    sys.exit(0)
+def is_latin(c):
+    try:
+        return "LATIN" in unicodedata.name(c)
+    except ValueError:
+        return False
+foreign = sum(1 for c in letters if not is_latin(c))
+sys.exit(1 if foreign / len(letters) > 0.15 else 0)
+'; then
+    exit 0   # langue hors fr/en detectee -> rien tape
+  fi
+fi
+
 # ---- Filtre final: artefacts d'hallucination connus --------------------------
 # Tue uniquement si TOUTE la sortie == un artefact connu (insensible casse).
 # Inoffensif pour la vraie dictee: personne ne dicte exactement ces phrases.
@@ -85,6 +111,8 @@ case "$norm" in
   "thank you."|\
   "you"|\
   "..."|"."|"♪"|"♪♪"|"[musique]"|"[music]")
+    exit 0 ;;
+  "("*")"|"["*"]")
     exit 0 ;;
 esac
 
