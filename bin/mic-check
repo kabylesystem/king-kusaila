@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-CTRL=/sys/bus/pci/devices/0000:00:1f.3/power/runtime_status
+if command -v framework_tool >/dev/null 2>&1; then
+  priv="$(sudo framework_tool --privacy 2>/dev/null | awk '/Microphone/ {print $2}')"
+  if [[ "$priv" == "Disconnected" ]]; then
+    echo "VERDICT: SWITCH MICRO SUR ROUGE (coupe matériellement)"
+    echo "-> pousse le petit slider micro au-dessus de l'ecran vers le noir, puis relance"
+    exit 1
+  fi
+  [[ -n "$priv" ]] && echo "switch micro physique: $priv (OK)"
+fi
+
 SINK="$(pactl list sinks short | awk '$2 ~ /^alsa_output\./ {print $2; exit}')"
 SRC="$(pactl list sources short | awk '$2 ~ /^alsa_input\./ {print $2; exit}')"
+[[ -z "$SRC" ]] && { echo "VERDICT: aucune source micro dans PipeWire (essaie: systemctl --user restart wireplumber)"; exit 1; }
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT
 
@@ -11,40 +21,36 @@ python3 - "$DIR/tone.wav" <<'PY'
 import wave, struct, math, sys
 r = 48000
 w = wave.open(sys.argv[1], 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(r)
-w.writeframes(b''.join(struct.pack('<h', int(12000*math.sin(2*math.pi*880*i/r))) for i in range(r*2)))
+w.writeframes(b''.join(struct.pack('<h', int(12000*math.sin(2*math.pi*880*i/r))) for i in range(r*4)))
 w.close()
 PY
 
-cycle() {
-  pw-record --target "$SRC" --rate 16000 --channels 1 --format s16 "$DIR/cap.wav" >/dev/null 2>&1 & local p=$!
-  sleep 0.4
-  pw-play --target "$SINK" "$DIR/tone.wav"
-  sleep 0.4
-  kill -INT "$p" 2>/dev/null; wait "$p" 2>/dev/null
-  python3 - "$DIR/cap.wav" <<'PY'
+pw-record --target "$SRC" --rate 16000 --channels 1 --format s16 "$DIR/cap.wav" >/dev/null 2>&1 & P=$!
+sleep 2.5
+pw-play --target "$SINK" "$DIR/tone.wav"
+sleep 0.3
+kill -INT "$P" 2>/dev/null; wait "$P" 2>/dev/null
+
+python3 - "$DIR/cap.wav" <<'PY'
 import wave, struct, math, sys
 w = wave.open(sys.argv[1]); n = w.getnframes()
 s = struct.unpack('<%dh' % n, w.readframes(n))
-rms = math.sqrt(sum(x*x for x in s)/max(n, 1))
-print('CAPTE' if rms > 3000 else 'MORT', f'(rms={rms:.0f})')
+sr = 16000
+tail = s[int(2.5*sr):]
+if len(tail) < sr:
+    print("VERDICT: capture trop courte, relance"); sys.exit(1)
+def goertzel(x, f):
+    re = sum(v*math.cos(2*math.pi*f*i/sr) for i, v in enumerate(x))
+    im = sum(v*math.sin(2*math.pi*f*i/sr) for i, v in enumerate(x))
+    return math.sqrt(re*re + im*im)/len(x)
+target = goertzel(tail, 880)
+noise = sum(goertzel(tail, f) for f in (500, 650, 1200, 1500))/4
+ratio = target/max(noise, 1e-9)
+rms = math.sqrt(sum(v*v for v in tail)/len(tail))
+print(f"bip 880Hz vs bruit: ratio={ratio:.1f} (rms fenetre={rms:.0f})")
+if ratio > 8:
+    print("VERDICT: MICRO VIVANT, le bip des hauts-parleurs est capte")
+else:
+    print("VERDICT: MICRO MUET (bip non capte) alors que le switch est noir -> creuser driver/kernel")
+    sys.exit(1)
 PY
-}
-
-echo "kernel: $(uname -r) · power_save=$(cat /sys/module/snd_hda_intel/parameters/power_save)"
-printf 'attente suspend du controleur HDA... '
-for _ in $(seq 1 40); do [ "$(cat "$CTRL")" = suspended ] && break; sleep 1; done
-echo "[$(cat "$CTRL")]"
-
-printf 'cycle 1 (sortie de suspend) : '
-r1="$(cycle)"
-echo "$r1"
-sleep 1
-printf 'cycle 2 (controleur actif)  : '
-r2="$(cycle)"
-echo "$r2"
-
-case "$r1|$r2" in
-  CAPTE*"|"CAPTE*) echo "VERDICT: micro SAIN, bug kernel absent ou corrige" ;;
-  CAPTE*"|"MORT*)  echo "VERDICT: bug kernel TOUJOURS LA (routes mortes apres fermeture de stream) · garder power_save=1, tester un kernel plus recent ou le LTS" ;;
-  *)               echo "VERDICT: micro totalement muet, probleme plus profond (source, volume, materiel)" ;;
-esac
