@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+if hyprctl clients -j | jq -e 'any(.[]; .class == "org.telegram.desktop")' >/dev/null 2>&1; then
+  hyprctl dispatch focuswindow "class:org.telegram.desktop"
+else
+  setsid Telegram >/dev/null 2>&1 &
+fi
