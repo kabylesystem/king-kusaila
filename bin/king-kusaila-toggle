@@ -27,15 +27,22 @@ restore_bluetooth_hifi() {
   "$HOME/.local/bin/sony-audio-fix" >/dev/null 2>&1 || true
 }
 
+mic_gain_sane() {
+  local card="${KING_MIC_CARD:-0}"
+  amixer -c "$card" -q sset "Internal Mic Boost" "${KING_MIC_BOOST:-0}" 2>/dev/null || true
+  amixer -c "$card" -q sset Capture "${KING_MIC_CAPTURE:-88%}" 2>/dev/null || true
+}
+
 start_recording() {
   local source=""
+  mic_gain_sane
   source="$(record_source)"
   # Lancer pw-record TOUT DE SUITE : ne pas bloquer le debut de la mission sur
   # le switch de profil Bluetooth (qui peut prendre plusieurs secondes).
   if [[ -n "$source" ]]; then
-    pw-record --target "$source" --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+    pw-record --target "$source" --rate 16000 --channels 2 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
   else
-    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
+    pw-record --rate 16000 --channels 2 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 &
   fi
   echo "$!" > "$PID_FILE"
   restore_bluetooth_hifi &  # async : ne touche que la sortie BT, pas le mic
