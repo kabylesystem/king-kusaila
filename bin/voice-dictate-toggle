@@ -39,7 +39,7 @@ restore_bluetooth_hifi() {
 mic_gain_sane() {
   local card="${KING_MIC_CARD:-0}"
   amixer -c "$card" -q sset "Internal Mic Boost" "${KING_MIC_BOOST:-0}" 2>/dev/null || true
-  amixer -c "$card" -q sset Capture "${KING_MIC_CAPTURE:-62%}" 2>/dev/null || true
+  amixer -c "$card" -q sset Capture "${KING_MIC_CAPTURE:-88%}" 2>/dev/null || true
 }
 
 start_recording() {
@@ -49,9 +49,9 @@ start_recording() {
   # Lancer pw-record TOUT DE SUITE ; 9>&- ferme le fd du verrou pour l'enfant
   # (sinon il tient le lock et bloque le stop).
   if [[ -n "$source" ]]; then
-    pw-record --target "$source" --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
+    pw-record --target "$source" --rate 16000 --channels 2 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
   else
-    pw-record --rate 16000 --channels 1 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
+    pw-record --rate 16000 --channels 2 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
   fi
   echo "$!" > "$PID_FILE"
   restore_bluetooth_hifi 9>&- &  # async : ne touche que la sortie BT, pas le mic

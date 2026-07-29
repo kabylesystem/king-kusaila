@@ -19,15 +19,32 @@ HEAD_CLIP_FRACTION = 0.5
 HEAD_QUIET_DB = -24.0
 
 MIN_DUR = float(os.environ.get("KING_MIN_AUDIO_SEC", "0.35"))
-MIN_PEAK_DB = float(os.environ.get("KING_MIN_PEAK_DB", "-22"))
-MIN_LOUD_RMS_DB = float(os.environ.get("KING_MIN_LOUD_RMS_DB", "-34"))
+MIN_PEAK_DB = float(os.environ.get("KING_MIN_PEAK_DB", "-34"))
+MIN_SNR_DB = float(os.environ.get("KING_MIN_SNR_DB", "8"))
 MAX_CLIP_PCT = float(os.environ.get("KING_MAX_CLIP_PCT", "20"))
 LOUD_WIN_SEC = 0.3
 LOUD_HOP_SEC = 0.1
+FLOOR_PERCENTILE = 0.10
 
 
 def db(x):
     return 20 * math.log10(max(x, 1e-9) / 32768.0)
+
+
+def snr_of(samples, rate):
+    profile = sorted(window_rms_profile(samples, rate))
+    loud = db(profile[-1])
+    floor = db(profile[min(len(profile) - 1, int(len(profile) * FLOOR_PERCENTILE))])
+    return loud - floor
+
+
+def pick_best_channel(samples, channels, rate):
+    if channels < 2:
+        return samples, 0
+    lanes = [samples[c::channels] for c in range(channels)]
+    scored = [(snr_of(lane, rate), idx) for idx, lane in enumerate(lanes)]
+    best_snr, best_idx = max(scored)
+    return lanes[best_idx], best_idx
 
 
 def load(path):
@@ -40,12 +57,8 @@ def load(path):
             frames = w.getnframes()
             raw = w.readframes(frames)
         samples = list(struct.unpack("<%dh" % (len(raw) // 2), raw))
-        if channels > 1:
-            samples = [
-                sum(samples[i : i + channels]) // channels
-                for i in range(0, len(samples) - channels + 1, channels)
-            ]
-        return samples, rate
+        samples, channel = pick_best_channel(samples, channels, rate)
+        return samples, rate, channel
     except Exception:
         pass
     try:
@@ -53,9 +66,9 @@ def load(path):
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
              "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
             capture_output=True, timeout=60, check=True).stdout
-        return list(struct.unpack("<%dh" % (len(out) // 2), out)), 16000
+        return list(struct.unpack("<%dh" % (len(out) // 2), out)), 16000, 0
     except Exception:
-        return None, None
+        return None, None, 0
 
 
 def trim_wakeup_pop(samples, rate):
@@ -76,16 +89,15 @@ def trim_wakeup_pop(samples, rate):
     return samples[limit:], limit
 
 
-def loudest_window_rms(samples, rate):
+def window_rms_profile(samples, rate):
     win = max(1, int(LOUD_WIN_SEC * rate))
     hop = max(1, int(LOUD_HOP_SEC * rate))
     if len(samples) <= win:
-        return math.sqrt(sum(v * v for v in samples) / len(samples))
-    best = 0.0
-    for start in range(0, len(samples) - win + 1, hop):
-        chunk = samples[start : start + win]
-        best = max(best, math.sqrt(sum(v * v for v in chunk) / len(chunk)))
-    return best
+        return [math.sqrt(sum(v * v for v in samples) / len(samples))]
+    return [
+        math.sqrt(sum(v * v for v in samples[s : s + win]) / win)
+        for s in range(0, len(samples) - win + 1, hop)
+    ]
 
 
 def main():
@@ -94,7 +106,7 @@ def main():
         return 2
 
     src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-    samples, rate = load(src)
+    samples, rate, channel = load(src)
     if not samples or not rate:
         print(json.dumps({"ok": False, "error": "unreadable audio"}))
         return 1
@@ -108,7 +120,10 @@ def main():
     peak = max(abs(v) for v in samples)
     rms = math.sqrt(sum(v * v for v in samples) / len(samples))
     peak_db, rms_db = db(peak), db(rms)
-    loud_rms_db = db(loudest_window_rms(samples, rate))
+    profile = sorted(window_rms_profile(samples, rate))
+    loud_rms_db = db(profile[-1])
+    floor_rms_db = db(profile[min(len(profile) - 1, int(len(profile) * FLOOR_PERCENTILE))])
+    snr_db = loud_rms_db - floor_rms_db
 
     duration = len(samples) / rate
     clipped_pct = clipped_before * 100
@@ -117,7 +132,7 @@ def main():
         verdict = "short"
     elif clipped_pct > MAX_CLIP_PCT:
         verdict = "clipped"
-    elif peak_db < MIN_PEAK_DB or loud_rms_db < MIN_LOUD_RMS_DB:
+    elif peak_db < MIN_PEAK_DB or snr_db < MIN_SNR_DB:
         verdict = "silence"
     else:
         verdict = "speech"
@@ -135,11 +150,14 @@ def main():
     print(json.dumps({
         "ok": True,
         "verdict": verdict,
+        "channel": channel,
         "duration": round(duration, 3),
         "trimmed_ms": round(trimmed * 1000 / rate, 1),
         "peak_db": round(peak_db, 1),
         "rms_db": round(rms_db, 1),
         "loud_rms_db": round(loud_rms_db, 1),
+        "floor_rms_db": round(floor_rms_db, 1),
+        "snr_db": round(snr_db, 1),
         "gain_db": round(gain_db, 1),
         "clipped_pct": round(clipped_pct, 1),
     }))
