@@ -81,6 +81,7 @@ def main() -> int:
         # temperature 0 = deterministe, reduit fortement les hallucinations.
         "temperature": os.environ.get("KING_OPENAI_TRANSCRIBE_TEMPERATURE", "0"),
         "prompt": prompt,
+        "language": os.environ.get("KING_TRANSCRIBE_LANG", "fr"),
     }
     body, boundary = multipart(fields, {"file": audio})
 

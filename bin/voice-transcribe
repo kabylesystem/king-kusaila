@@ -2,16 +2,27 @@
 set -euo pipefail
 
 CONFIG="$HOME/.config/king-kusaila/openai.env"
-BACKEND="${KING_TRANSCRIBE_BACKEND:-}"
 
 if [[ -f "$CONFIG" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$CONFIG"
-  set +a
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key//[[:space:]]/}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    val="${val#\"}"; val="${val%\"}"
+    val="${val#\'}"; val="${val%\'}"
+    [[ -n "$key" ]] || continue
+    [[ -n "${!key:-}" ]] && continue
+    export "$key=$val"
+  done < "$CONFIG"
 fi
 
-BACKEND="${KING_TRANSCRIBE_BACKEND:-${BACKEND:-openai}}"
+BACKEND="${KING_TRANSCRIBE_BACKEND:-openai}"
+OPENAI_MODEL="${KING_OPENAI_TRANSCRIBE_MODEL:-gpt-4o-transcribe}"
+export KING_OPENAI_TRANSCRIBE_MODEL="$OPENAI_MODEL"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: voice-transcribe <audio-file>" >&2
@@ -19,48 +30,60 @@ if [[ $# -lt 1 ]]; then
 fi
 
 audio="$1"
+original_audio="$1"
 
-# ---- Gate anti-hallucination -------------------------------------------------
-# gpt-4o-transcribe / whisper INVENTENT du texte sur du silence ou un clip
-# accidentel (double Super+C). Mesure: parole max_volume ~ -0.2 dB, silence
-# ~ -91 dB. On bloque AVANT l'appel ASR -> aucun faux texte tape dans la
-# fenetre, et zero cout/latence inutile.
-MIN_DUR="${KING_MIN_AUDIO_SEC:-0.35}"     # secondes
-MIN_PEAK_DB="${KING_MIN_PEAK_DB:--40}"    # dB (max_volume)
+KING_TRANSCRIBE_LANG="${KING_TRANSCRIBE_LANG:-fr}"
+export KING_TRANSCRIBE_LANG
 
-audio_has_speech() {
-  local f="$1" dur peak
-  command -v ffprobe >/dev/null 2>&1 || return 0   # pas d'outil -> ne pas bloquer
-  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null || true)"
-  if [[ -n "$dur" ]] && awk -v d="$dur" -v m="$MIN_DUR" 'BEGIN{exit !(d+0 < m+0)}'; then
-    return 1   # trop court
+PREP="$HOME/.local/bin/voice-audio-prep"
+LOG="${KING_TRANSCRIBE_LOG:-${audio%.*}.prep.json}"
+asr_input="$audio"
+
+if [[ -f "$audio" && -x "$PREP" ]]; then
+  clean="${audio%.*}.clean.wav"
+  if metrics="$("$PREP" "$audio" "$clean" 2>/dev/null)" && [[ -n "$metrics" ]]; then
+    printf '%s\n' "$metrics" > "$LOG" 2>/dev/null || true
+    verdict="$(jq -r '.verdict // "unknown"' <<<"$metrics" 2>/dev/null || echo unknown)"
+    case "$verdict" in
+      speech) asr_input="$clean" ;;
+      clipped)
+        echo "voice-transcribe: micro sature ($(jq -r '.clipped_pct' <<<"$metrics")% ecrete) -> gain d'entree trop haut" >&2
+        exit 0 ;;
+      silence|short) exit 0 ;;
+      *) asr_input="$audio" ;;
+    esac
   fi
-  command -v ffmpeg >/dev/null 2>&1 || return 0
-  peak="$(ffmpeg -hide_banner -nostats -i "$f" -af volumedetect -f null /dev/null 2>&1 \
-          | awk -F': ' '/max_volume/{gsub(/ dB/,"",$2); print $2; exit}')"
-  if [[ -n "$peak" ]] && awk -v p="$peak" -v t="$MIN_PEAK_DB" 'BEGIN{exit !(p+0 < t+0)}'; then
-    return 1   # silence
-  fi
-  return 0
-}
-
-if [[ -f "$audio" ]] && ! audio_has_speech "$audio"; then
-  exit 0   # silence / trop court -> sortie vide, l'appelant ne tape rien
 fi
 
+audio="$asr_input"
+
 # ---- Backends ----------------------------------------------------------------
+BACKEND_FILE="${original_audio%.*}.backend"
+note_backend() { printf '%s\n' "$1" > "$BACKEND_FILE" 2>/dev/null || true; }
+
 transcribe() {
   if [[ "$BACKEND" == "local" ]]; then
+    note_backend "whisper local (KING_TRANSCRIBE_BACKEND=local)"
     "$HOME/.local/bin/voice-transcribe-local" "$audio"
     return
   fi
-  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-    local text
-    if text="$("$HOME/.local/bin/voice-transcribe-openai" "$audio")" && [[ -n "${text//[[:space:]]/}" ]]; then
-      printf '%s\n' "$text"
-      return
-    fi
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "voice-transcribe: OPENAI_API_KEY absente de ~/.config/king-kusaila/openai.env" >&2
+    note_backend "whisper local (pas de cle OpenAI)"
+    "$HOME/.local/bin/voice-transcribe-local" "$audio"
+    return
   fi
+  local text err
+  err="$(mktemp)"
+  if text="$("$HOME/.local/bin/voice-transcribe-openai" "$audio" 2>"$err")" && [[ -n "${text//[[:space:]]/}" ]]; then
+    note_backend "$OPENAI_MODEL"
+    rm -f "$err"
+    printf '%s\n' "$text"
+    return
+  fi
+  echo "voice-transcribe: $OPENAI_MODEL a echoue -> repli whisper local. Cause: $(tr '\n' ' ' < "$err")" >&2
+  note_backend "whisper local (repli, $OPENAI_MODEL a echoue: $(tr '\n' ' ' < "$err" | cut -c1-200))"
+  rm -f "$err"
   "$HOME/.local/bin/voice-transcribe-local" "$audio"
 }
 

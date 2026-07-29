@@ -36,8 +36,15 @@ restore_bluetooth_hifi() {
   "$HOME/.local/bin/sony-audio-fix" >/dev/null 2>&1 || true
 }
 
+mic_gain_sane() {
+  local card="${KING_MIC_CARD:-0}"
+  amixer -c "$card" -q sset "Internal Mic Boost" "${KING_MIC_BOOST:-0}" 2>/dev/null || true
+  amixer -c "$card" -q sset Capture "${KING_MIC_CAPTURE:-62%}" 2>/dev/null || true
+}
+
 start_recording() {
   local source=""
+  mic_gain_sane
   source="$(record_source)"
   # Lancer pw-record TOUT DE SUITE ; 9>&- ferme le fd du verrou pour l'enfant
   # (sinon il tient le lock et bloque le stop).
@@ -236,7 +243,7 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   restore_bluetooth_hifi 9>&- &  # async : ne pas retarder la transcription
 
   notify "TRANSCRIBING..." "info"
-  if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE")"; then
+  if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE" 2>>"$STATE_DIR/dictate.log")"; then
     notify "TRANSCRIPTION FAILED" "err"
     exit 1
   fi

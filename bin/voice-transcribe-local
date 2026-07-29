@@ -25,7 +25,7 @@ log="$base.whisper.log"
 whisper-cli \
   --model "$MODEL" \
   --file "$audio" \
-  --language auto \
+  --language "${KING_TRANSCRIBE_LANG:-fr}" \
   --no-timestamps \
   --output-txt \
   --output-file "$base" \
