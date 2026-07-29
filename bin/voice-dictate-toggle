@@ -249,7 +249,13 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   fi
 
   if [[ -z "${text//[[:space:]]/}" ]]; then
-    notify "NO SPEECH DETECTED" "err"
+    reason="$(jq -r '"\(.verdict) · pic \(.peak_db)dB · SNR \(.snr_db)dB"' "$STATE_DIR/input.prep.json" 2>/dev/null || true)"
+    case "$reason" in
+      clipped*) notify "MICRO SATURÉ - $reason" "err" ;;
+      short*)   notify "TROP COURT - $reason" "err" ;;
+      silence*) notify "RIEN ENTENDU - $reason" "err" ;;
+      *)        notify "NO SPEECH DETECTED" "err" ;;
+    esac
     exit 0
   fi
 

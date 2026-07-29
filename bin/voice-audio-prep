@@ -21,9 +21,12 @@ HEAD_QUIET_DB = -24.0
 MIN_DUR = float(os.environ.get("KING_MIN_AUDIO_SEC", "0.35"))
 MIN_PEAK_DB = float(os.environ.get("KING_MIN_PEAK_DB", "-34"))
 MIN_SNR_DB = float(os.environ.get("KING_MIN_SNR_DB", "8"))
+LOUD_ENOUGH_DB = float(os.environ.get("KING_LOUD_ENOUGH_DB", "-30"))
 MAX_CLIP_PCT = float(os.environ.get("KING_MAX_CLIP_PCT", "20"))
 LOUD_WIN_SEC = 0.3
 LOUD_HOP_SEC = 0.1
+FLOOR_WIN_SEC = 0.1
+FLOOR_HOP_SEC = 0.05
 FLOOR_PERCENTILE = 0.10
 
 
@@ -32,9 +35,7 @@ def db(x):
 
 
 def snr_of(samples, rate):
-    profile = sorted(window_rms_profile(samples, rate))
-    loud = db(profile[-1])
-    floor = db(profile[min(len(profile) - 1, int(len(profile) * FLOOR_PERCENTILE))])
+    loud, floor = loud_and_floor_db(samples, rate)
     return loud - floor
 
 
@@ -89,15 +90,22 @@ def trim_wakeup_pop(samples, rate):
     return samples[limit:], limit
 
 
-def window_rms_profile(samples, rate):
-    win = max(1, int(LOUD_WIN_SEC * rate))
-    hop = max(1, int(LOUD_HOP_SEC * rate))
+def window_rms_profile(samples, rate, win_sec=LOUD_WIN_SEC, hop_sec=LOUD_HOP_SEC):
+    win = max(1, int(win_sec * rate))
+    hop = max(1, int(hop_sec * rate))
     if len(samples) <= win:
         return [math.sqrt(sum(v * v for v in samples) / len(samples))]
     return [
         math.sqrt(sum(v * v for v in samples[s : s + win]) / win)
         for s in range(0, len(samples) - win + 1, hop)
     ]
+
+
+def loud_and_floor_db(samples, rate):
+    loud = sorted(window_rms_profile(samples, rate))[-1]
+    quiet = sorted(window_rms_profile(samples, rate, FLOOR_WIN_SEC, FLOOR_HOP_SEC))
+    floor = quiet[min(len(quiet) - 1, int(len(quiet) * FLOOR_PERCENTILE))]
+    return db(loud), db(floor)
 
 
 def main():
@@ -120,19 +128,18 @@ def main():
     peak = max(abs(v) for v in samples)
     rms = math.sqrt(sum(v * v for v in samples) / len(samples))
     peak_db, rms_db = db(peak), db(rms)
-    profile = sorted(window_rms_profile(samples, rate))
-    loud_rms_db = db(profile[-1])
-    floor_rms_db = db(profile[min(len(profile) - 1, int(len(profile) * FLOOR_PERCENTILE))])
+    loud_rms_db, floor_rms_db = loud_and_floor_db(samples, rate)
     snr_db = loud_rms_db - floor_rms_db
 
     duration = len(samples) / rate
     clipped_pct = clipped_before * 100
+    audible = snr_db >= MIN_SNR_DB or loud_rms_db >= LOUD_ENOUGH_DB
 
     if duration < MIN_DUR:
         verdict = "short"
     elif clipped_pct > MAX_CLIP_PCT:
         verdict = "clipped"
-    elif peak_db < MIN_PEAK_DB or snr_db < MIN_SNR_DB:
+    elif peak_db < MIN_PEAK_DB or not audible:
         verdict = "silence"
     else:
         verdict = "speech"
