@@ -16,15 +16,64 @@ WALLBASH_DUNST="$HOME/.local/share/wallbash/scripts/dunst.sh"
 log() { printf '%s naly-restore: %s\n' "$(date +%H:%M:%S)" "$*"; }
 did=0
 
+BAR_UNIT="hyde-Hyprland-bar.service"
+
+reload_waybar() {
+  local unit_active pid
+  unit_active=0
+  systemctl --user is-active --quiet "$BAR_UNIT" 2>/dev/null && unit_active=1
+
+  if [[ "$unit_active" == 1 ]]; then
+    if systemctl --user restart "$BAR_UNIT" 2>/dev/null; then
+      log "waybar relancée via $BAR_UNIT (config relue à coup sûr)"
+      return
+    fi
+  fi
+
+  for _ in {1..20}; do
+    pid="$(pgrep -x waybar | head -1)"
+    [[ -n "$pid" ]] && break
+    sleep 0.25
+  done
+  if [[ -n "${pid:-}" ]]; then
+    sleep 0.5
+    while read -r p; do
+      [[ -n "$p" ]] && kill -USR2 "$p" 2>/dev/null || true
+    done < <(pgrep -x waybar)
+    log "waybar rechargée par SIGUSR2 (unité systemd absente)"
+  else
+    log "waybar introuvable : rien à recharger"
+  fi
+}
+
 # ── 1. Waybar : King absent de la barre ? → réappliquer le layout canonique ──
-if [[ -f "$CFG" ]] && ! grep -q 'custom/king-voice' "$CFG" 2>/dev/null; then
+king_in_bar() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+try:
+    raw = open(sys.argv[1], encoding="utf-8").read()
+except OSError:
+    sys.exit(1)
+try:
+    cfg = json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))
+except Exception:
+    sys.exit(1)
+wanted = {"custom/king-voice", "custom/claude", "custom/ios", "image#king"}
+placed = set()
+for key, val in cfg.items():
+    if key.startswith("group/") and isinstance(val, dict):
+        placed.update(val.get("modules") or [])
+    if key.startswith("modules-") and isinstance(val, list):
+        placed.update(val)
+sys.exit(0 if wanted <= placed else 1)
+PY
+}
+
+if [[ -f "$CFG" ]] && ! king_in_bar "$CFG"; then
   if [[ -f "$LAYOUT" ]]; then
     cp -f "$LAYOUT" "$CFG"
     log "King + DND réinjectés dans config.jsonc"
-    # Recharge la waybar EXISTANTE (SIGUSR2 = reload config in-place) au lieu d'en
-    # relancer une 2e. HyDE garde la propriété du process (hyde-Hyprland-bar.service)
-    # → plus jamais de double barre au boot.
-    killall -SIGUSR2 waybar 2>/dev/null || true
+    reload_waybar
     did=1
   else
     log "ERREUR : layout canonique introuvable ($LAYOUT)"
@@ -32,26 +81,50 @@ if [[ -f "$CFG" ]] && ! grep -q 'custom/king-voice' "$CFG" 2>/dev/null; then
 fi
 
 # ── 2. Glass dunst : marqueur naly absent du cache ? → réécrire + régénérer ──
-if ! grep -q 'naly-glass' "$GLASS" 2>/dev/null; then
+if ! grep -q 'naly-glass v4' "$GLASS" 2>/dev/null; then
   mkdir -p "$(dirname "$GLASS")"
   cat > "$GLASS" <<'EOF'
-# naly-glass : notifs translucides sombres (Tokyo Night) SANS bordure.
+# naly-glass v4 : notifs glass SOMBRES et LISIBLES (fond ~85% d'opacité : le
+# blur Hyprland traverse encore, mais le texte reste lisible sur N'IMPORTE QUEL
+# fond — l'ancien alpha 15% était illisible sur fond clair). Pas d'icône
+# forcée : chaque app garde la sienne (Telegram, batterie...), comme sous GNOME.
 # Réécrit automatiquement par naly-desktop-restore après chaque switch de thème HyDE.
 # (le flou vient de Hyprland : layerrule blur sur namespace "notifications" dans userprefs.conf)
 
+# Ce bloc est la DERNIÈRE section du dunstrc généré -> il gagne sur tout,
+# y compris la section "mandatory" HyDE dont le font-string est cassé
+# ("Adwaita Sans 11,JetBrainsMono Nerd Font 11" n'est pas du Pango valide ->
+# retombait sur du mono). Ici : un vrai font Pango, propre.
+[global]
+    font = Adwaita Sans 10
+
 [urgency_low]
-    background = "#1a1b2626"
-    foreground = "#c0caf5ff"
+    background = "#16161ed9"
+    foreground = "#c8cdf0ff"
     frame_color = "#00000000"
-    icon = "${iconsDir}/Wallbash-Icon/hyprdots.svg"
     timeout = 5
 
 [urgency_normal]
-    background = "#24283b26"
-    foreground = "#c0caf5ff"
+    background = "#1a1b26d9"
+    foreground = "#e6e9f5ff"
     frame_color = "#00000000"
-    icon = "${iconsDir}/Wallbash-Icon/hyprdots.svg"
     timeout = 5
+
+[urgency_critical]
+    background = "#1a1b26ee"
+    foreground = "#f0f2fbff"
+    frame_color = "#f7768eff"
+    highlight = "#f7768eff"
+    timeout = 10
+
+# v4 — verrou anti-sticky UNIVERSEL (demande naly 2026-07-06 : « peu importe la
+# notif, au bout de 10s elle dégage ») : AUCUNE notif ne reste plus de 10s, même
+# si le client envoie -t 0 ou un timeout long — override_dbus_timeout remplace
+# le timeout dbus du client (man 5 dunst). Sans client timeout, ce sont les
+# timeout = 5/5/10 des sections urgency ci-dessus qui s'appliquent.
+[cap-toutes-10s]
+    appname = ".*"
+    override_dbus_timeout = 10
 EOF
   log "glass dunst réinjecté dans le cache wallbash"
   if [[ -x "$WALLBASH_DUNST" ]]; then

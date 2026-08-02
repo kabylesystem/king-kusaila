@@ -4,6 +4,13 @@
 // Les NOMS de ces modules sont (re)mis dans la barre par ~/.local/bin/naly-desktop-restore
 // (déclenché par le watcher systemd naly-desktop-restore.path après chaque régén HyDE).
 {
+    "clock": {
+        "format": "{:%I:%M %p}",
+        "rotate": 0,
+        "format-alt": "{:%R 󰃭 %d·%m·%y}",
+        "tooltip": false,
+        "on-click": "$HOME/.local/bin/gsimplecal-popup.sh"
+    },
     "custom/claude": {
         "exec": "$HOME/.local/bin/waybar-claude.sh",
         "return-type": "json",
@@ -28,13 +35,29 @@
         "on-click-right": "kitty --hold --title 'King Kusaila' -e $HOME/.local/bin/king-kusaila-status",
         "tooltip": true
     },
+    "custom/thermal": {
+        "exec": "$HOME/.local/bin/waybar-thermal.sh",
+        "return-type": "json",
+        "interval": 3,
+        "tooltip": true,
+        "on-click": "/usr/local/bin/naly-thermal-profile cycle",
+        "on-click-right": "/usr/local/bin/naly-thermal-profile silencieux"
+    },
     "custom/dnd": {
-        "exec": "if [ \"$(dunstctl is-paused)\" = \"true\" ]; then echo '󰂛'; else echo '󰂚'; fi",
+        "exec": "if [ \"$(dunstctl get-pause-level)\" -gt 0 ]; then echo '󰂛'; else echo '󰂚'; fi",
         "interval": 2,
         "tooltip": true,
-        "tooltip-format": "Notifications — clic gauche : Do Not Disturb · clic droit : rappeler la dernière · clic milieu : tout effacer",
-        "on-click": "dunstctl set-paused toggle",
+        "tooltip-format": "Notifications — clic gauche : Do Not Disturb (l'OSD volume/luminosité et la batterie critique passent quand même) · clic droit : rappeler la dernière · clic milieu : tout effacer",
+        "on-click": "sh -c 'if [ \"$(dunstctl get-pause-level)\" -gt 0 ]; then dunstctl set-pause-level 0; else dunstctl set-pause-level 60; fi'",
         "on-click-right": "dunstctl history-pop",
         "on-click-middle": "dunstctl history-clear"
+    },
+    "custom/ios": {
+        "exec": "$HOME/.local/bin/ios-status --waybar",
+        "return-type": "json",
+        "interval": 300,
+        "tooltip": true,
+        "on-click": "/home/kusaila/.local/bin/ios-status-window",
+        "on-click-right": "/home/kusaila/.local/bin/ytplus-refresh.sh"
     }
 }
