@@ -278,20 +278,71 @@ deliver_text() {
   return 0
 }
 
+kitty_pty_of() {
+  local kpid="$1" pts child
+  pts="$(ps --ppid "$kpid" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
+  if [[ -z "$pts" ]]; then
+    for child in $(ps --ppid "$kpid" -o pid= --no-headers 2>/dev/null); do
+      pts="$(ps --ppid "$child" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
+      [[ -n "$pts" ]] && break
+    done
+  fi
+  [[ -n "$pts" ]] && printf '/dev/%s' "$pts"
+  return 0
+}
+
 kitty_deliver() {
-  local target="$1" text="$2" pid sock
+  local target="$1" text="$2" kpid pts sock
   [[ "${KING_DICTATE_KITTY_BG:-1}" == "1" ]] || return 1
+  kpid="$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$target" '.[] | select(.address == $a) | .pid // empty' 2>/dev/null || true)"
+  [[ -n "$kpid" ]] || return 1
+
+  pts="$(kitty_pty_of "$kpid")"
+  if [[ -n "$pts" && -w "$pts" ]]; then
+    if KING_TEXT="$text" KING_PTS="$pts" python3 - <<'PY' 2>>"$STATE_DIR/dictate.log"
+import json, os, subprocess, time
+
+text = os.environ.get("KING_TEXT", "")
+try:
+    raw = subprocess.run(["kitty", "--version"], capture_output=True, text=True, timeout=10).stdout
+    version = [int(p) for p in raw.split()[1].split(".")[:3]]
+except Exception:
+    version = [0, 48, 0]
+
+
+def dcs(data, bracketed=None):
+    payload = {"data": "text:" + data}
+    if bracketed:
+        payload["bracketed_paste"] = bracketed
+    cmd = {"cmd": "send-text", "version": version, "no_response": True, "payload": payload}
+    return b"\x1bP@kitty-cmd" + json.dumps(cmd).encode("ascii") + b"\x1b\\"
+
+
+fd = os.open(os.environ["KING_PTS"], os.O_WRONLY | os.O_NOCTTY)
+try:
+    os.write(fd, dcs(text, "auto"))
+    if os.environ.get("KING_DICTATE_AUTOSEND", "1") == "1":
+        time.sleep(float(os.environ.get("KING_DICTATE_SEND_DELAY", "0.15")))
+        os.write(fd, dcs("\r"))
+finally:
+    os.close(fd)
+PY
+    then
+      dlog "livraison ARRIERE-PLAN via pty kitty ($pts) : aucun changement de focus"
+      return 0
+    fi
+    dlog "injection pty $pts a echoue, essai du socket"
+  fi
+
   command -v kitty >/dev/null 2>&1 || return 1
-  pid="$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$target" '.[] | select(.address == $a) | .pid // empty' 2>/dev/null || true)"
-  [[ -n "$pid" ]] || return 1
-  sock="unix:@kitty-$pid"
+  sock="unix:@kitty-$kpid"
   kitty @ --to "$sock" ls >/dev/null 2>&1 || return 1
   if [[ "${KING_DICTATE_AUTOSEND:-1}" == "1" ]]; then
     printf '%s\n' "$text"
   else
     printf '%s' "$text"
   fi | kitty @ --to "$sock" send-text --stdin 2>>"$STATE_DIR/dictate.log" || return 1
-  dlog "livraison ARRIERE-PLAN via kitty ($sock) : aucun changement de focus"
+  dlog "livraison ARRIERE-PLAN via socket kitty ($sock) : aucun changement de focus"
   return 0
 }
 
