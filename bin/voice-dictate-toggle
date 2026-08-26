@@ -16,6 +16,8 @@ LAST_PRESS_FILE="$STATE_DIR/last-press"
 RECORD_START_FILE="$STATE_DIR/record.start"
 SEND_FLAG="$STATE_DIR/send-requested"
 TRANSCRIBING_FLAG="$STATE_DIR/transcribing"
+PENDING_FLAG="$STATE_DIR/pending-deliver"
+LAST_TARGET_FILE="$STATE_DIR/last-target"
 DOUBLETAP_MS="${KING_DICTATE_DOUBLETAP_MS:-2500}"
 SEND_FLAG_TTL="${KING_DICTATE_SEND_TTL:-180}"
 
@@ -34,8 +36,10 @@ consume_send() { rm -f "$SEND_FLAG"; }
 # --- DOUBLE APPUI = ENVOYER ------------------------------------------------
 # Un appui : demarre/arrete la dictee (le texte est TAPE, jamais envoye).
 # Deux appuis en moins de 2,5 s : envoie (Entree). Si le 1er appui du double a
-# lancer un enregistrement, on l'annule ; si une transcription tourne encore,
-# on pose un drapeau et l'envoi part des que le texte est tape.
+# lance un enregistrement, on l'annule. Si une transcription (ASR) tourne ou si
+# une livraison attend, on pose un drapeau : l'envoi part des que le texte est
+# tape, SANS attendre le retour de kabylesystem sur la fenetre. Et si tout est deja fini,
+# on vise la derniere fenetre dictee plutot que celle sous les yeux.
 NOW_MS="$(now_ms)"
 LAST_MS="$(cat "$LAST_PRESS_FILE" 2>/dev/null || echo 0)"
 printf '%s\n' "$NOW_MS" > "$LAST_PRESS_FILE"
@@ -52,14 +56,29 @@ if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
       rm -f "$PID_FILE" "$AUDIO_FILE" "$TARGET_FILE" "$RECORD_START_FILE"
     fi
   fi
-  if [[ -f "$TRANSCRIBING_FLAG" ]]; then
+  if [[ -f "$TRANSCRIBING_FLAG" || -f "$PENDING_FLAG" ]]; then
     : > "$SEND_FLAG"
     "$HOME/.local/bin/king-voice-status" transcribing "ENVOI DÈS QUE C'EST TAPÉ" || true
-  else
+    exit 0
+  fi
+  last_target="$(cat "$LAST_TARGET_FILE" 2>/dev/null || true)"
+  here="$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null || true)"
+  if [[ -n "$last_target" && "$last_target" != "$here" ]] \
+     && hyprctl clients -j 2>/dev/null | jq -e --arg a "$last_target" 'any(.[]; .address == $a)' >/dev/null 2>&1; then
+    hyprctl dispatch focuswindow "address:$last_target" >/dev/null 2>&1 || true
+    for _ in {1..40}; do
+      [[ "$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty')" == "$last_target" ]] && break
+      sleep 0.05
+    done
     sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
     wtype -k Return 2>/dev/null || true
-    "$HOME/.local/bin/king-voice-status" done "ENVOYÉ" || true
+    [[ -n "$here" ]] && hyprctl dispatch focuswindow "address:$here" >/dev/null 2>&1 || true
+    "$HOME/.local/bin/king-voice-status" done "ENVOYÉ (fenêtre de la dictée)" || true
+    exit 0
   fi
+  sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
+  wtype -k Return 2>/dev/null || true
+  "$HOME/.local/bin/king-voice-status" done "ENVOYÉ" || true
   exit 0
 fi
 
@@ -234,6 +253,7 @@ PY
       fi
     ) 8>"$STATE_DIR/deliver-$short.lock"
   fi
+  rm -f "$PENDING_FLAG"
 }
 
 dlog() { printf '%s dictate: %s\n' "$(date +%T)" "$*" >> "$STATE_DIR/dictate.log" 2>/dev/null || true; }
@@ -258,7 +278,12 @@ focus_lock() {
   return 0
 }
 
-cleanup_on_exit() { focus_unlock; rm -f "$TRANSCRIBING_FLAG"; }
+OWNS_TRANSCRIBING=0
+cleanup_on_exit() {
+  focus_unlock
+  (( OWNS_TRANSCRIBING )) && rm -f "$TRANSCRIBING_FLAG"
+  return 0
+}
 trap cleanup_on_exit EXIT INT TERM HUP
 
 window_exists() {
@@ -311,8 +336,9 @@ deliver_text() {
       sleep 0.12
       continue
     fi
-    if ! title_ok "$want_title"; then
+    if ! title_ok "$want_title" && ! send_requested; then
       dlog "titre different de '$want_title' -> mise en file plutot que taper au mauvais endroit"
+      : > "$PENDING_FLAG"
       queue_for_window "$target" "${text:i}" "$want_title" </dev/null >/dev/null 2>&1 9>&- &
       "$HOME/.local/bin/king-voice-status" done "EN ATTENTE - reviens sur le bon onglet" || true
       return 2
@@ -431,6 +457,7 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   restore_bluetooth_hifi 9>&- &  # async : ne pas retarder la transcription
 
   : > "$TRANSCRIBING_FLAG"
+  OWNS_TRANSCRIBING=1
   notify "TRANSCRIBING..." "info"
   if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE" 2>>"$STATE_DIR/dictate.log")"; then
     notify "TRANSCRIPTION FAILED" "err"
@@ -454,6 +481,7 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   t_class="$(jq -r '.class // empty' <<<"$target_json" 2>/dev/null || true)"
   t_title="$(jq -r '.title // empty' <<<"$target_json" 2>/dev/null || true)"
   came_from="$(focused_address)"
+  [[ -n "$target" ]] && printf '%s\n' "$target" > "$LAST_TARGET_FILE" || true
 
   guard_title=""
   case "$t_class" in
