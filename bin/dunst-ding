@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Son de notif joué par DUNST (règle [son-messageries] de dunst.conf), pas par
+# les applis — Telegram/Signal ont leur son in-app coupé. Résultat : le DND
+# (pause-level > 0) coupe le son AUSSI, pas seulement le popup.
+# Le gate est indispensable : always_run_script=true fait tourner les scripts
+# même quand la notif est supprimée par le DND.
+[ "$(dunstctl get-pause-level)" -gt 0 ] && exit 0
+exec paplay /usr/share/sounds/freedesktop/stereo/message-new-instant.oga

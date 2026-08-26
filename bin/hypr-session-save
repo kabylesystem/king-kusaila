@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Snapshot des fenêtres Hyprland → ~/.local/state/hypr-session/last.json
+
+Capture pour chaque fenêtre : classe, titre, workspace, commande exacte
+(/proc/PID/cmdline) et cwd (pour les terminaux : le cwd du shell enfant).
+Lancé toutes les 2 min par hypr-session-save.timer. Sans Hyprland → exit 0.
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+STATE_DIR = os.path.expanduser("~/.local/state/hypr-session")
+OUT = os.path.join(STATE_DIR, "last.json")
+CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+
+# Fenêtres à ne jamais restaurer (popups/outils du desktop)
+SKIP_CLASSES = {"gsimplecal", "rofi", "Rofi", "dunst"}
+SKIP_TITLE_SUBSTR = ("King Kusaila Panel",)
+# Terminaux : le cwd intéressant est celui du shell enfant
+TERMINAL_CLASSES = {"kitty", "foot", "Alacritty", "alacritty", "org.wezfurlong.wezterm"}
+
+
+def find_hypr_signature():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    if sig:
+        return sig
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    hypr_dir = os.path.join(runtime, "hypr")
+    try:
+        entries = [
+            (os.path.getmtime(os.path.join(hypr_dir, e)), e)
+            for e in os.listdir(hypr_dir)
+            if os.path.isdir(os.path.join(hypr_dir, e))
+        ]
+    except FileNotFoundError:
+        return None
+    if not entries:
+        return None
+    return max(entries)[1]
+
+
+def proc_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    parts = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
+    # Certains lanceurs passent tout argv en un seul bloc ("brave --flag") → re-split
+    if len(parts) == 1 and " " in parts[0]:
+        parts = shlex.split(parts[0])
+    return parts or None
+
+
+def proc_cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return os.path.expanduser("~")
+
+
+SHELLS = {"fish", "zsh", "bash", "sh"}
+
+
+def child_shell_cwd(pid):
+    """cwd du VRAI shell du terminal (là où l'utilisateur a `cd`).
+
+    Piège vécu (2026-07-06) : le 1er enfant de kitty est un helper
+    `kitten __atexit__` qui garde le cwd de LANCEMENT du terminal → un shell
+    qui avait cd ailleurs était restauré dans ~. On cherche donc un shell
+    parmi les enfants, et on ignore les kitten."""
+    try:
+        kids = subprocess.run(
+            ["pgrep", "-P", str(pid)], capture_output=True, text=True
+        ).stdout.split()
+    except OSError:
+        kids = []
+    named = []
+    for k in kids:
+        cmd = proc_cmdline(k)
+        if cmd:
+            named.append((k, os.path.basename(cmd[0])))
+    for k, name in named:
+        if name in SHELLS:
+            return proc_cwd(k)
+    for k, name in named:
+        if name != "kitten":
+            return proc_cwd(k)  # ex : wrapper claude-here.sh, claude, vim…
+    return proc_cwd(pid)
+
+
+def descendants(pid):
+    """Tous les PIDs descendants (BFS via pgrep -P)."""
+    found, stack = [], [str(pid)]
+    while stack:
+        try:
+            kids = subprocess.run(
+                ["pgrep", "-P", stack.pop()], capture_output=True, text=True
+            ).stdout.split()
+        except OSError:
+            kids = []
+        found += kids
+        stack += kids
+    return found
+
+
+def claude_procs_under(pid):
+    """Process `claude` (CLI Claude Code) qui tournent dans ce terminal."""
+    procs = []
+    for k in descendants(pid):
+        cmd = proc_cmdline(k)
+        if cmd and os.path.basename(cmd[0]) == "claude" \
+                and "--chrome-native-host" not in cmd:
+            procs.append({"pid": int(k), "cmd": clean_claude_argv(cmd),
+                          "cwd": proc_cwd(k)})
+    return procs
+
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def clean_claude_argv(cmd):
+    """Retire les flags de reprise (-r/--resume/-c/--continue [+ uuid]) : le
+    restore rajoutera le sien avec le bon session id."""
+    out, skip = [], False
+    for a in cmd:
+        if skip:
+            skip = False
+            if UUID_RE.match(a):
+                continue
+            # pas un uuid : c'était un flag sans argument, garder ce token
+        if a in ("-r", "--resume"):
+            skip = True
+            continue
+        if a in ("-c", "--continue"):
+            continue
+        out.append(a)
+    return out
+
+
+def assign_claude_sessions(windows):
+    """Associe chaque process claude au transcript (.jsonl) de sa conversation.
+
+    Pas de session id exposé par le process → heuristique : dans le dossier
+    ~/.claude/projects/<cwd-mungé>/, les .jsonl triés par mtime desc sont les
+    convs les plus récemment actives ; on les distribue aux claude du même
+    dossier (1 pour 1). Si deux convs vivent dans le même dossier, l'appariement
+    exact terminal↔conv peut être permuté, mais les DEUX convs reviennent."""
+    by_proj = {}
+    for w in windows:
+        for entry in w.get("claude", []):
+            proj = re.sub(r"[^A-Za-z0-9]", "-", entry["cwd"])
+            by_proj.setdefault(proj, []).append(entry)
+    for proj, entries in by_proj.items():
+        pdir = os.path.join(CLAUDE_PROJECTS, proj)
+        try:
+            jsonls = sorted(
+                (os.path.join(pdir, f) for f in os.listdir(pdir)
+                 if f.endswith(".jsonl")),
+                key=os.path.getmtime, reverse=True,
+            )
+        except OSError:
+            jsonls = []
+        for entry, path in zip(entries, jsonls):
+            entry["session"] = os.path.splitext(os.path.basename(path))[0]
+        for entry in entries:
+            entry.setdefault("session", None)
+            entry.pop("pid", None)
+
+
+def main():
+    sig = find_hypr_signature()
+    if not sig:
+        return 0  # pas de Hyprland → rien à faire
+    os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+
+    try:
+        clients = json.loads(
+            subprocess.run(
+                ["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=10
+            ).stdout
+        )
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
+        return 0
+
+    windows = []
+    seen_claude_pids = set()
+    for c in clients:
+        if not c.get("mapped") or c.get("pid", -1) <= 0:
+            continue
+        cls = c.get("class", "")
+        title = c.get("title", "")
+        if not cls or cls in SKIP_CLASSES:
+            continue
+        if any(s in title for s in SKIP_TITLE_SUBSTR):
+            continue
+        pid = c["pid"]
+        cmd = proc_cmdline(pid)
+        if not cmd:
+            continue
+        cwd = child_shell_cwd(pid) if cls in TERMINAL_CLASSES else proc_cwd(pid)
+        win = {
+            "class": cls,
+            "title": title,
+            "workspace": c["workspace"]["id"],
+            "floating": c.get("floating", False),
+            "pid": pid,
+            "cmd": cmd,
+            "cwd": cwd,
+        }
+        if cls in TERMINAL_CLASSES:
+            # kitty single-instance : plusieurs fenêtres partagent un PID →
+            # chaque claude n'est réclamé que par UNE fenêtre (dedup global)
+            fresh = [p for p in claude_procs_under(pid)
+                     if p["pid"] not in seen_claude_pids]
+            if fresh:
+                seen_claude_pids.update(p["pid"] for p in fresh)
+                win["claude"] = fresh
+        windows.append(win)
+
+    assign_claude_sessions(windows)
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"windows": windows}, f, indent=1)
+    os.replace(tmp, OUT)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

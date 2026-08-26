@@ -1,0 +1,6 @@
+[Unit]
+Description=Notif batterie faible (10%% / 5%%, perce le DND)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/battery-watch

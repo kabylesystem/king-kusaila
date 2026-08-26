@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -uo pipefail
+cat > /dev/null
+sleep 0.4
+DB="${XDG_CACHE_HOME:-$HOME/.cache}/naly-clipboard/dates.tsv"
+mkdir -p "$(dirname "$DB")"
+id="$(cliphist list 2>/dev/null | head -1 | cut -f1)"
+[[ -n "$id" ]] || exit 0
+grep -q "^$id"$'\t' "$DB" 2>/dev/null && exit 0
+printf '%s\t%s\n' "$id" "$(date +%s)" >> "$DB"
+tail -n 4000 "$DB" > "$DB.tmp" 2>/dev/null && mv -f "$DB.tmp" "$DB"
+exit 0

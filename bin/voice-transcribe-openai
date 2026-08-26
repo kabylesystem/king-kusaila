@@ -71,6 +71,8 @@ def main() -> int:
     model = os.environ.get("KING_OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
     prompt = os.environ.get(
         "KING_OPENAI_TRANSCRIBE_PROMPT",
+        "Transcription fidèle dans la langue parlée. Ne jamais traduire. "
+        "Si l'audio est en français, écrire en français. Vocabulaire : "
         "Claude, Claude Code, Codex, Anthropic, Cursor, OpenAI, Hyprland, CachyOS, HyDE, Waybar, "
         "Wayland, kitty, Vercel, Next.js, React, Tailwind, shadcn, Supabase, GitHub, Higgsfield, "
         "Kabyle, King Kusaila.",

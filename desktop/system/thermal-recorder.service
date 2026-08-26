@@ -1,0 +1,15 @@
+[Unit]
+Description=Enregistreur thermique - garde qui fait chauffer le PC
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/thermal-recorder
+Restart=always
+RestartSec=10
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

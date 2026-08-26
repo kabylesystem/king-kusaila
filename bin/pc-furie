@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+import json, sys, time
+
+LOG = "/var/lib/thermal-recorder/history.jsonl"
+HOURS = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0
+CUTOFF = time.time() - HOURS * 3600
+
+
+def load():
+    rows = []
+    try:
+        with open(LOG, errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("ts", 0) >= CUTOFF and d.get("temp"):
+                    rows.append(d)
+    except OSError:
+        sys.exit("enregistreur absent : sudo systemctl start thermal-recorder")
+    return rows
+
+
+rows = load()
+if not rows:
+    sys.exit("aucune mesure sur les %g dernieres heures" % HOURS)
+
+temps = [r["temp"] for r in rows]
+watts = [r["watts"] for r in rows if r.get("watts")]
+rpms = [r["rpm"] for r in rows if r.get("rpm")]
+hot = [r for r in rows if r["temp"] >= 85]
+
+print("\033[1m%d mesures sur %g h\033[0m" % (len(rows), HOURS))
+print("  temperature : moyenne %d°C   max %d°C   %d mesures au-dessus de 85°C (%.0f%% du temps)"
+      % (sum(temps) / len(temps), max(temps), len(hot), 100 * len(hot) / len(rows)))
+if watts:
+    print("  puissance   : moyenne %.1f W   max %.1f W" % (sum(watts) / len(watts), max(watts)))
+if rpms:
+    print("  ventilateur : moyenne %d RPM   max %d RPM" % (sum(rpms) / len(rpms), max(rpms)))
+
+blame = {}
+for r in hot:
+    for t in r.get("top", []):
+        cmd = t["cmd"].split()[0].split("/")[-1] if t["cmd"] else "?"
+        blame[cmd] = blame.get(cmd, 0) + t["pct"]
+
+if blame:
+    print("\n\033[1mQui tourne pendant les pics de chaleur\033[0m")
+    for cmd, tot in sorted(blame.items(), key=lambda x: -x[1])[:8]:
+        print("  %7.0f%% cumules  %s" % (tot, cmd))
+else:
+    print("\n  aucun pic au-dessus de 85°C : rien a incriminer")
+
+peak = max(rows, key=lambda r: r["temp"])
+print("\n\033[1mPic le plus chaud\033[0m  %s  %d°C  %s W  %s RPM"
+      % (time.strftime("%d/%m %H:%M", time.localtime(peak["ts"])),
+         peak["temp"], peak.get("watts"), peak.get("rpm")))
+for t in peak.get("top", [])[:4]:
+    print("   %5.1f%%  %s" % (t["pct"], t["cmd"][:76]))

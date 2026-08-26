@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Le fond d'écran doit suivre les branchements d'écran.
+
+Le daemon awww (backend wallpaper HyDE) rate parfois un output branché à chaud
+(écran externe ajouté après le boot -> écran noir, vu le 2026-07-05). Ce watcher
+écoute les événements Hyprland (socket2) et relance le service wallpaper à
+chaque `monitoradded` : awww redémarre et repeint TOUS les outputs.
+
+Lancé par l'unit user `wallpaper-hotplug-watch.service` (graphical-session).
+"""
+import os
+import socket
+import subprocess
+import sys
+import time
+
+WALLPAPER_UNIT = "hyde-Hyprland-wallpaper.service"
+# le temps que Hyprland applique monitors.conf (position/scale) avant de peindre
+SETTLE_S = 2
+# plusieurs événements peuvent tomber d'un coup (dock multi-écrans) -> un seul restart
+DEBOUNCE_S = 5
+
+
+def socket2_path():
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    hypr_dir = os.path.join(runtime, "hypr")
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    candidates = [sig] if sig else []
+    # fallback : signature absente/périmée -> la plus récente instance vivante
+    if os.path.isdir(hypr_dir):
+        candidates += sorted(
+            os.listdir(hypr_dir),
+            key=lambda d: os.path.getmtime(os.path.join(hypr_dir, d)),
+            reverse=True,
+        )
+    for c in candidates:
+        if not c:
+            continue
+        path = os.path.join(hypr_dir, c, ".socket2.sock")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def main():
+    path = socket2_path()
+    if not path:
+        print("socket2 Hyprland introuvable — session pas encore prête ?", file=sys.stderr)
+        sys.exit(1)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(path)
+    print(f"en écoute sur {path}", flush=True)
+
+    last_restart = 0.0
+    buf = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            print("socket fermée (Hyprland arrêté ?)", file=sys.stderr)
+            sys.exit(1)  # Restart= du service nous relance si la session vit encore
+        buf += chunk
+        lines, _, buf = buf.rpartition(b"\n")
+        for line in lines.split(b"\n"):
+            # couvre monitoradded et monitoraddedv2
+            if not line.startswith(b"monitoradded"):
+                continue
+            now = time.monotonic()
+            if now - last_restart < DEBOUNCE_S:
+                continue
+            last_restart = now
+            name = line.split(b">>", 1)[-1].decode(errors="replace")
+            print(f"écran branché ({name}) -> repaint wallpaper", flush=True)
+            time.sleep(SETTLE_S)
+            subprocess.run(
+                ["systemctl", "--user", "restart", WALLPAPER_UNIT], check=False
+            )
+
+
+if __name__ == "__main__":
+    main()

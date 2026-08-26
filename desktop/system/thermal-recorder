@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+import glob, json, os, time
+
+STATE = "/var/lib/thermal-recorder"
+LOG = os.path.join(STATE, "history.jsonl")
+MAX_BYTES = 12 * 1024 * 1024
+INTERVAL = 5.0
+HZ = os.sysconf("SC_CLK_TCK")
+
+
+def find_hwmon(name):
+    for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            if open(os.path.join(h, "name")).read().strip() == name:
+                return h
+        except OSError:
+            pass
+    return None
+
+
+CPU_HWMON = find_hwmon("coretemp")
+FAN_HWMON = find_hwmon("cros_ec") or find_hwmon("acpi_fan")
+RAPL = "/sys/class/powercap/intel-rapl:0/energy_uj"
+
+
+def read_int(path):
+    try:
+        return int(open(path).read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def temp_c():
+    if CPU_HWMON:
+        v = read_int(os.path.join(CPU_HWMON, "temp1_input"))
+        if v:
+            return v // 1000
+    vals = [read_int(p) for p in glob.glob("/sys/class/thermal/thermal_zone*/temp")]
+    vals = [v for v in vals if v]
+    return max(vals) // 1000 if vals else None
+
+
+def fan_rpm():
+    return read_int(os.path.join(FAN_HWMON, "fan1_input")) if FAN_HWMON else None
+
+
+def proc_cpu():
+    out = {}
+    for p in glob.glob("/proc/[0-9]*/stat"):
+        try:
+            raw = open(p).read()
+            pid = p.split("/")[2]
+            rest = raw[raw.rindex(")") + 2:].split()
+            out[pid] = int(rest[11]) + int(rest[12])
+        except (OSError, ValueError, IndexError):
+            pass
+    return out
+
+
+def proc_name(pid):
+    try:
+        cmd = open("/proc/%s/cmdline" % pid).read().replace("\0", " ").strip()
+        if cmd:
+            return cmd[:70]
+    except OSError:
+        pass
+    try:
+        return "[%s]" % open("/proc/%s/comm" % pid).read().strip()
+    except OSError:
+        return "?"
+
+
+def rotate():
+    try:
+        if os.path.getsize(LOG) < MAX_BYTES:
+            return
+        with open(LOG, "rb") as f:
+            data = f.read()
+        cut = data.find(b"\n", len(data) // 2)
+        with open(LOG, "wb") as f:
+            f.write(data[cut + 1:] if cut > 0 else b"")
+    except OSError:
+        pass
+
+
+os.makedirs(STATE, exist_ok=True)
+prev_proc = proc_cpu()
+prev_energy = read_int(RAPL)
+prev_t = time.time()
+tick = 0
+
+while True:
+    time.sleep(INTERVAL)
+    now = time.time()
+    dt = now - prev_t
+    cur_proc = proc_cpu()
+    cur_energy = read_int(RAPL)
+
+    watts = None
+    if cur_energy is not None and prev_energy is not None and cur_energy >= prev_energy:
+        watts = round((cur_energy - prev_energy) / dt / 1e6, 1)
+
+    tops = []
+    for pid, ticks in cur_proc.items():
+        old = prev_proc.get(pid)
+        if old is None:
+            continue
+        pct = (ticks - old) / HZ / dt * 100
+        if pct > 3:
+            tops.append((round(pct, 1), pid))
+    tops.sort(reverse=True)
+
+    entry = {
+        "ts": int(now),
+        "temp": temp_c(),
+        "rpm": fan_rpm(),
+        "watts": watts,
+        "load": round(os.getloadavg()[0], 2),
+        "top": [{"pct": p, "cmd": proc_name(pid)} for p, pid in tops[:4]],
+    }
+
+    try:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    prev_proc, prev_energy, prev_t = cur_proc, cur_energy, now
+    tick += 1
+    if tick % 120 == 0:
+        rotate()

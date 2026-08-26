@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+import glob
+import json
+import os
+import re
+import subprocess
+import time
+
+STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "naly-antibug")
+REPORT = os.path.join(STATE, "last.txt")
+PROFILE_BIN = "/usr/local/bin/naly-thermal-profile"
+RECORDER = "/var/lib/thermal-recorder/history.jsonl"
+HZ = os.sysconf("SC_CLK_TCK")
+NEVER = re.compile(
+    r"Hyprland|waybar|pipewire|wireplumber|quickshell|systemd|dbus|kitty|claude|"
+    r"sway|hypr|Xwayland|gnome-keyring|polkit|udev|thermal-recorder"
+)
+
+os.makedirs(STATE, exist_ok=True)
+
+
+def run(cmd, timeout=6):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def hwmon(name):
+    for h in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            if open(os.path.join(h, "name")).read().strip() == name:
+                return h
+        except OSError:
+            pass
+    return None
+
+
+def read_int(path):
+    try:
+        return int(open(path).read().strip())
+    except Exception:
+        return None
+
+
+CPU_H, FAN_H = hwmon("coretemp"), hwmon("cros_ec") or hwmon("acpi_fan")
+
+
+def temp():
+    v = read_int(os.path.join(CPU_H, "temp1_input")) if CPU_H else None
+    return v // 1000 if v else 0
+
+
+def rpm():
+    return read_int(os.path.join(FAN_H, "fan1_input")) if FAN_H else 0
+
+
+def watts():
+    try:
+        with open(RECORDER, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096))
+            last = f.read().decode(errors="replace").strip().split("\n")[-1]
+        return json.loads(last).get("watts")
+    except Exception:
+        return None
+
+
+def psi(path, kind):
+    try:
+        for line in open(path):
+            if line.startswith(kind):
+                return float(line.split("avg10=")[1].split()[0])
+    except Exception:
+        pass
+    return 0.0
+
+
+def procs():
+    out = {}
+    for p in glob.glob("/proc/[0-9]*/stat"):
+        pid = p.split("/")[2]
+        try:
+            f = open(p).read()
+            name = f[f.index("(") + 1:f.rindex(")")]
+            r = f[f.rindex(")") + 2:].split()
+            out[pid] = {
+                "name": name,
+                "ppid": r[1],
+                "state": r[0],
+                "cpu": (int(r[11]) + int(r[12])) / HZ,
+                "start": int(r[19]) / HZ,
+            }
+        except Exception:
+            pass
+    return out
+
+
+def cmdline(pid):
+    try:
+        return open("/proc/%s/cmdline" % pid).read().replace("\0", " ").strip()
+    except OSError:
+        return ""
+
+
+def has_net(pid):
+    return ("pid=%s," % pid) in run(["ss", "-tnp"]) or ("pid=%s)" % pid) in run(["ss", "-tnp"])
+
+
+def audio_playing():
+    return "Sink Input" in run(["pactl", "list", "sink-inputs"])
+
+
+uptime = float(open("/proc/uptime").read().split()[0])
+snap1 = procs()
+time.sleep(2.5)
+snap2 = procs()
+
+live = []
+for pid, b in snap2.items():
+    a = snap1.get(pid)
+    if not a:
+        continue
+    pct = (b["cpu"] - a["cpu"]) / 2.5 * 100
+    cmd = cmdline(pid)
+    if cmd and pct > 40 and not NEVER.search(b["name"]):
+        live.append((pct, pid, b["name"], cmd))
+live.sort(reverse=True)
+
+ghosts = []
+for pid, b in snap2.items():
+    if b["ppid"] != "1" or NEVER.search(b["name"]):
+        continue
+    age = uptime - b["start"]
+    if age < 1800 or b["cpu"] < 120:
+        continue
+    cmd = cmdline(pid)
+    if not cmd:
+        continue
+    a = snap1.get(pid)
+    now_pct = (b["cpu"] - a["cpu"]) / 2.5 * 100 if a else 0
+    if now_pct < 0.5:
+        continue
+    if has_net(pid):
+        continue
+    ghosts.append((b["cpu"] / 60, age / 3600, pid, b["name"], cmd, now_pct))
+ghosts.sort(reverse=True)
+
+dupes = {}
+for pid, b in snap2.items():
+    cmd = cmdline(pid)
+    m = re.search(r"([\w.-]+\.(?:py|js|sh))", cmd)
+    if m and not NEVER.search(b["name"]):
+        age = uptime - b["start"]
+        dupes.setdefault(m.group(1), []).append((pid, age))
+dupes = {k: v for k, v in dupes.items() if len(v) >= 3}
+stale = {k: v for k, v in dupes.items()
+         if sum(1 for _, age in v if age > 3600) >= 3}
+
+zombies = sum(1 for b in snap2.values() if b["state"] == "Z")
+
+t0, w, r0 = temp(), watts(), rpm()
+load = os.getloadavg()[0]
+cpu_psi, io_psi = psi("/proc/pressure/cpu", "some"), psi("/proc/pressure/io", "full")
+profile = run([PROFILE_BIN, "get"]).strip() or "?"
+
+fixed, found = [], []
+offer = None
+
+for pct, pid, name, cmd in live[:3]:
+    subprocess.run(["renice", "-n", "19", "-p", pid], capture_output=True)
+    subprocess.run(["ionice", "-c3", "-p", pid], capture_output=True)
+    found.append("%s à %.0f%% de CPU" % (name, pct))
+    if offer is None and pct >= 75 and not audio_playing():
+        offer = ("freeze", pid, name, "sature un cœur et ne joue aucun son")
+    else:
+        fixed.append("%s calmé" % name)
+
+if ghosts:
+    cpu_min, age_h, pid, name, cmd, now = ghosts[0]
+    found.append("%s tourne en orphelin depuis %.0f h (%.0f min de CPU brûlées)"
+                 % (name, age_h, cpu_min))
+    if offer is None:
+        offer = ("kill", pid, name,
+                 "abandonné par son lanceur, sans réseau, mais consomme encore %.1f%%" % now)
+
+for script, entries in dupes.items():
+    oldest = max(age for _, age in entries) / 3600
+    found.append("%d copies de %s tournent en parallèle (la plus vieille : %.0f h)"
+                 % (len(entries), script, oldest))
+
+if stale and offer is None:
+    script, entries = max(stale.items(), key=lambda kv: len(kv[1]))
+    offer = ("sweep", ",".join(pid for pid, _ in entries), script,
+             "%d copies empilées depuis des heures, plus personne ne les attend"
+             % len(entries))
+
+if zombies >= 2:
+    found.append("%d process zombies (un parent ne récupère pas ses enfants)" % zombies)
+
+if profile == "perf" and t0 >= 88:
+    if subprocess.run(["sudo", "-n", PROFILE_BIN, "equilibre"], capture_output=True).returncode == 0:
+        fixed.append("profil Perf → Équilibré")
+
+crash = run(["journalctl", "--user", "-b", "0", "--since", "-5 min", "--no-pager"])
+c = re.findall(r"(\S+\.service): Scheduled restart", crash)
+if c:
+    top = max(set(c), key=c.count)
+    if c.count(top) >= 3:
+        found.append("%s redémarre en boucle (%d× en 5 min)" % (top, c.count(top)))
+
+io1 = {}
+for p in glob.glob("/proc/[0-9]*/io"):
+    try:
+        io1[p.split("/")[2]] = int(dict(l.split(": ") for l in open(p).read().strip().split("\n"))["write_bytes"])
+    except Exception:
+        pass
+time.sleep(2)
+for p, before in io1.items():
+    try:
+        after = int(dict(l.split(": ") for l in open("/proc/%s/io" % p).read().strip().split("\n"))["write_bytes"])
+    except Exception:
+        continue
+    mb = (after - before) / 2 / 1048576
+    if mb >= 25 and p in snap2 and not snap2[p]["name"].startswith("kworker"):
+        subprocess.run(["ionice", "-c3", "-p", p], capture_output=True)
+        fixed.append("%s (%.0f Mo/s) mis en I/O basse" % (snap2[p]["name"], mb))
+
+time.sleep(2)
+t1, r1 = temp(), rpm()
+
+with open(REPORT, "w") as f:
+    f.write("%s  %d°C→%d°C  %sW  %d→%d RPM  charge %.1f  profil %s\n"
+            % (time.strftime("%H:%M"), t0, t1, w, r0, r1, load, profile))
+    f.write("trouve: %s\n" % (" · ".join(found) if found else "rien d anormal"))
+    f.write("corrige: %s\n" % (" · ".join(fixed) if fixed else "rien a corriger"))
+
+body = ""
+if fixed:
+    body += "<b>Corrigé</b>\n" + "\n".join("· " + x for x in fixed) + "\n"
+if found:
+    body += "<b>Trouvé</b>\n" + "\n".join("· " + x for x in found) + "\n"
+if not fixed and not found:
+    body += ("Aucun coupable. La chaleur vient des rafales du CPU, pas d un bug.\n"
+             if t1 >= 88 else "Rien d anormal, la machine est saine.\n")
+body += "\n%d°C · %s W · %d RPM · charge %.1f · CPU bloqué %.0f%%" % (t1, w, r1, load, cpu_psi)
+
+if offer:
+    kind, pid, name, why = offer
+    body += "\n\n<b>%s</b> : %s." % (name, why)
+    if kind == "freeze":
+        actions = ["-A", "freeze=Geler %s" % name, "-A", "kill=Fermer %s" % name]
+    elif kind == "sweep":
+        actions = ["-A", "sweep=Nettoyer les %d copies" % len(pid.split(","))]
+    else:
+        actions = ["-A", "kill=Tuer %s" % name, "-A", "freeze=Geler %s" % name]
+    ans = run(["notify-send", "-a", "anti-bug", "-u", "critical", "-t", "25000"]
+              + actions + ["-A", "no=Laisser", "Anti-bug", body], timeout=30).strip()
+    if ans == "sweep":
+        killed = 0
+        for one in pid.split(","):
+            try:
+                os.kill(int(one), 15)
+                killed += 1
+            except OSError:
+                pass
+        time.sleep(2)
+        for one in pid.split(","):
+            try:
+                os.kill(int(one), 9)
+            except OSError:
+                pass
+        run(["notify-send", "-a", "anti-bug", "-t", "7000", "Anti-bug",
+             "%d copies de %s nettoyées." % (killed, name)])
+    elif ans == "freeze":
+        os.kill(int(pid), 19)
+        run(["notify-send", "-a", "anti-bug", "-t", "8000", "Anti-bug",
+             "%s gelé, rien de perdu.\nRéveil : <tt>kill -CONT %s</tt>" % (name, pid)])
+    elif ans == "kill":
+        os.kill(int(pid), 15)
+        time.sleep(2)
+        try:
+            os.kill(int(pid), 0)
+            os.kill(int(pid), 9)
+        except OSError:
+            pass
+        run(["notify-send", "-a", "anti-bug", "-t", "6000", "Anti-bug", "%s terminé." % name])
+else:
+    run(["notify-send", "-a", "anti-bug", "-u", "normal", "-t", "14000", "Anti-bug", body])

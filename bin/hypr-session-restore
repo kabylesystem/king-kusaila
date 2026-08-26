@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Restaure les fenêtres d'un snapshot hypr-session sur leurs workspaces.
+
+Usage : hypr-session-restore [--dry-run] [fichier.json]
+Sans argument : ~/.local/state/hypr-session/boot-candidate.json s'il existe,
+sinon last.json. Une appli multi-fenêtres (même PID, ex. navigateur) n'est
+lancée qu'une fois ; les Chromium-like reçoivent --restore-last-session.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+
+STATE_DIR = os.path.expanduser("~/.local/state/hypr-session")
+CHROMIUM_LIKE = ("brave", "chromium", "chrome", "vivaldi", "opera", "edge")
+TERMINAL_CLASSES = {"kitty", "foot", "Alacritty", "alacritty", "org.wezfurlong.wezterm"}
+
+
+def pick_snapshot(argv_paths):
+    if argv_paths:
+        return argv_paths[0]
+    for name in ("boot-candidate.json", "last.json"):
+        p = os.path.join(STATE_DIR, name)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return p
+    return None
+
+
+def terminal_wrap(win, cwd, inner):
+    """Relance le terminal de la fenêtre avec `inner` dedans (au bon cwd)."""
+    base = os.path.basename(win["cmd"][0])
+    if base == "foot":
+        return ["foot", "--working-directory", cwd] + inner
+    if base == "alacritty":
+        return ["alacritty", "--working-directory", cwd, "-e"] + inner
+    if base.endswith("wezterm"):
+        return [base, "start", "--cwd", cwd, "--"] + inner
+    return ["kitty", "--directory", cwd] + inner
+
+
+def claude_commands(win):
+    """[(cwd, cmd)] pour rouvrir chaque conversation Claude Code de la fenêtre
+    exactement où elle en était (claude --resume <session id>)."""
+    out = []
+    for entry in win.get("claude", []):
+        cwd = entry.get("cwd") or win.get("cwd") or os.path.expanduser("~")
+        inner = list(entry["cmd"])
+        if entry.get("session"):
+            inner += ["--resume", entry["session"]]
+        else:
+            inner += ["--continue"]  # session id introuvable : la + récente du dossier
+        out.append((cwd, terminal_wrap(win, cwd, inner)))
+    return out
+
+
+def build_command(win):
+    cmd = list(win["cmd"])
+    cls = win["class"].lower()
+    if any(b in cls for b in CHROMIUM_LIKE) and "--restore-last-session" not in cmd:
+        cmd.append("--restore-last-session")
+    if win["class"] in TERMINAL_CLASSES and win.get("cwd"):
+        base = os.path.basename(cmd[0])
+        if base == "kitty" and "--directory" not in cmd and "-d" not in cmd:
+            cmd += ["--directory", win["cwd"]]
+        elif base == "foot" and "--working-directory" not in cmd:
+            cmd += ["--working-directory", win["cwd"]]
+        elif base == "alacritty" and "--working-directory" not in cmd:
+            cmd += ["--working-directory", win["cwd"]]
+    return cmd
+
+
+def main():
+    args = sys.argv[1:]
+    dry = "--dry-run" in args
+    paths = [a for a in args if a != "--dry-run"]
+    snap_path = pick_snapshot(paths)
+    if not snap_path:
+        print("Aucun snapshot à restaurer.", file=sys.stderr)
+        return 1
+
+    with open(snap_path) as f:
+        windows = json.load(f)["windows"]
+
+    seen_pids = set()
+    launched = 0
+
+    def launch(ws, cls, cwd, cmd):
+        nonlocal launched
+        inner = f"cd {shlex.quote(cwd)} && exec {shlex.join(cmd)}"
+        dispatch = f"[workspace {ws} silent] sh -c {shlex.quote(inner)}"
+        if dry:
+            print(f"ws {ws:>2} · {cls:<20} → {shlex.join(cmd)}")
+            return
+        subprocess.run(["hyprctl", "dispatch", "exec", dispatch], capture_output=True)
+        launched += 1
+        time.sleep(0.4)
+
+    for win in windows:
+        # Terminal qui hébergeait Claude Code → rouvrir la CONV, pas un shell nu
+        if win.get("claude"):
+            seen_pids.add(win["pid"])
+            for cwd, cmd in claude_commands(win):
+                launch(win["workspace"], win["class"], cwd, cmd)
+            continue
+        if win["pid"] in seen_pids:
+            continue  # multi-fenêtres du même process (navigateur) : un seul lancement
+        seen_pids.add(win["pid"])
+        cmd = build_command(win)
+        cwd = win.get("cwd") or os.path.expanduser("~")
+        launch(win["workspace"], win["class"], cwd, cmd)
+
+    if not dry:
+        subprocess.run(
+            ["notify-send", "-i", "view-restore", "Session restaurée",
+             f"{launched} appli(s) relancée(s) sur leurs workspaces"],
+            capture_output=True,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

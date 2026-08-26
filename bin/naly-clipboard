@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -u
+RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+PIDFILE="$RUNDIR/naly-clipboard.pid"
+if [ -f "$PIDFILE" ]; then
+    OLD=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then
+        kill -TERM "$OLD" 2>/dev/null; rm -f "$PIDFILE"; exit 0
+    fi
+    rm -f "$PIDFILE"
+fi
+quickshell --allow-duplicate -p "$HOME/.config/quickshell/naly-clipboard" >"$RUNDIR/naly-clipboard.log" 2>&1 &
+echo $! > "$PIDFILE"

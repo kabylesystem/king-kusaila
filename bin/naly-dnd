@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Ne pas deranger : coupe TOUTES les notifications sauf les critiques
+# (batterie qui va eteindre le PC, surchauffe...). Etat persistant.
+set -u
+F="$HOME/.config/naly-notify/dnd"
+mkdir -p "$(dirname "$F")"
+[ -f "$F" ] || printf '0' > "$F"
+
+case "${1:-toggle}" in
+    on)     printf '1' > "$F" ;;
+    off)    printf '0' > "$F" ;;
+    status) cat "$F"; exit 0 ;;
+    icon)
+        if [ "$(cat "$F")" = "1" ]; then printf '󰂛'; else printf '󰂚'; fi
+        exit 0 ;;
+    *)
+        if [ "$(cat "$F")" = "1" ]; then printf '0' > "$F"; else printf '1' > "$F"; fi ;;
+esac
+
+pkill -RTMIN+10 waybar >/dev/null 2>&1 || true
+
+# Aucune notification pour signaler la bascule : l icone de la barre suffit.

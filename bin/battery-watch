@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# battery-watch — notif batterie faible : 10% (avertissement) et 5% (critique,
+# 10s max — naly ne veut JAMAIS de notif sticky qui reste des heures).
+# L'appname "Batterie" matche la règle dunst [batterie]
+# (override_pause_level 100) -> ces notifs PERCENT le Do Not Disturb.
+# Lancé chaque minute par battery-watch.timer (systemd --user).
+# Hystérésis : une seule notif par franchissement de seuil, réarmé dès qu'on
+# branche le chargeur (ou repasse au-dessus des seuils).
+set -euo pipefail
+
+bat=""
+for d in "${BATTERY_WATCH_SYS:-/sys/class/power_supply}"/BAT*; do
+  [[ -r "$d/capacity" ]] && bat="$d" && break
+done
+[[ -n "$bat" ]] || exit 0
+
+cap="$(cat "$bat/capacity")"
+status="$(cat "$bat/status")"
+state="${XDG_RUNTIME_DIR:-/tmp}/battery-watch.notified"
+
+# Sur secteur / chargé -> réarmer et sortir.
+if [[ "$status" != "Discharging" ]]; then
+  rm -f "$state"
+  exit 0
+fi
+
+last="$(cat "$state" 2>/dev/null || echo 101)"
+
+# Sécurité anti-perte de données (remplace le suspend que faisait HyDE) : suspend à 3%, sans notif de plus.
+if (( cap <= 3 )); then systemctl suspend; exit 0; fi
+
+# Chemins complets : le lookup par nom rate les icônes "panel" de Tela.
+icons="$HOME/.local/share/icons/Tela-circle-dracula/24/panel"
+ico_low="$icons/battery-low.svg";     [[ -f "$ico_low" ]]  || ico_low="battery-low"
+ico_crit="$icons/battery-caution.svg"; [[ -f "$ico_crit" ]] || ico_crit="battery-caution"
+
+if (( cap <= 5 && last > 5 )); then
+  notify-send -a "Batterie" -u critical -t 10000 -i "$ico_crit" \
+    "Batterie critique : ${cap}%" "Branche le chargeur MAINTENANT."
+  echo 5 > "$state"
+elif (( cap <= 10 && last > 10 )); then
+  notify-send -a "Batterie" -u normal -t 8000 -i "$ico_low" \
+    "Batterie faible : ${cap}%" "Pense à brancher le chargeur."
+  echo 10 > "$state"
+elif (( cap > 10 )); then
+  rm -f "$state"   # remonté au-dessus des seuils (calibrage...) -> réarmer
+fi
+exit 0

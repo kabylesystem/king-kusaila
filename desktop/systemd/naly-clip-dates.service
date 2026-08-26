@@ -1,0 +1,14 @@
+[Unit]
+Description=Date d'arrivee des entrees du presse-papier (cliphist n'en garde aucune)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wl-paste-datestamp-loop
+Restart=always
+RestartSec=5
+Nice=15
+
+[Install]
+WantedBy=graphical-session.target

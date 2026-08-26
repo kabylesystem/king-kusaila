@@ -1,0 +1,6 @@
+[Unit]
+Description=Snapshot des fenêtres Hyprland (pour restauration après reboot)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hypr-session-save

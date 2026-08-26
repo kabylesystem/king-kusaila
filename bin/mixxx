@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec nice -n 12 ionice -c2 -n6 /usr/bin/mixxx "$@"

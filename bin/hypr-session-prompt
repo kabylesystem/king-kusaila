@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Au demarrage de Hyprland : propose de rouvrir les fenetres de la session
+# precedente. Prompt rofi dans le theme kabylesystem, sans dependance a dunst.
+set -u
+STATE_DIR="$HOME/.local/state/hypr-session"
+LAST="$STATE_DIR/last.json"
+CAND="$STATE_DIR/boot-candidate.json"
+
+[ -s "$LAST" ] || exit 0
+
+if [ -n "$(find "$LAST" -mtime +3 2>/dev/null)" ]; then
+    rm -f "$LAST"
+    exit 0
+fi
+
+mv "$LAST" "$CAND"
+
+count=$(jq '.windows | map(.pid) | unique | length' "$CAND" 2>/dev/null) || exit 0
+[ "${count:-0}" -gt 0 ] || exit 0
+
+ANSWER=$("$HOME/.local/bin/naly-ask" \
+    "PREVIOUS SESSION" \
+    "$count app(s) were open before shutdown." \
+    "Reopen them" \
+    "Start fresh")
+
+[ "$ANSWER" = "yes" ] && exec "$HOME/.local/bin/hypr-session-restore" "$CAND"
+exit 0

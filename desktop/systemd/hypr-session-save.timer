@@ -1,0 +1,11 @@
+[Unit]
+Description=Snapshot des fenêtres Hyprland toutes les 2 min
+
+[Timer]
+# Délai au boot : laisse hypr-session-prompt mettre l'ancien snapshot à l'abri
+OnStartupSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

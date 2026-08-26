@@ -1,0 +1,257 @@
+/* User custom styles */
+
+/* Calendrier de l'horloge : tooltip au survol bien lisible et aéré */
+tooltip {
+    border-radius: 12px;
+    padding: 8px 12px;
+}
+
+tooltip label {
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+}
+
+@keyframes king-voice-pulse {
+    0% {
+        background: #991b1b;
+        color: #fff7f7;
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.85);
+    }
+    50% {
+        background: #ef4444;
+        color: #ffffff;
+        box-shadow: 0 0 14px 4px rgba(239, 68, 68, 0.42);
+    }
+    100% {
+        background: #991b1b;
+        color: #fff7f7;
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.85);
+    }
+}
+
+#custom-king-voice {
+    min-width: 25px;
+    margin: 0 3px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-weight: 800;
+    font-size: 10px;
+    letter-spacing: 0;
+    color: #d7dde8;
+    background: rgba(215, 221, 232, 0.10);
+}
+
+#custom-king-voice.idle {
+    color: rgba(215, 221, 232, 0.58);
+    background: rgba(215, 221, 232, 0.08);
+    opacity: 1;
+}
+
+#custom-king-voice.recording {
+    color: #fff7f7;
+    background: #dc2626;
+    min-width: 36px;
+    font-size: 10px;
+    animation-name: king-voice-pulse;
+    animation-duration: 900ms;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+}
+
+#custom-king-voice.transcribing {
+    color: #fff7f7;
+    background: #dc2626;
+    min-width: 36px;
+    font-size: 10px;
+    animation-name: king-voice-pulse;
+    animation-duration: 900ms;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+}
+
+#custom-king-voice.king {
+    color: #fbf7ff;
+    background: #7c3aed;
+}
+
+#custom-king-voice.done {
+    color: #04130a;
+    background: #22c55e;
+}
+
+#custom-king-voice.error {
+    color: #1f0a03;
+    background: #fb923c;
+}
+
+/* Jauge iOS sideload (📱 apps re-signées) : vert = ok, orange = <2j, rouge = expiré */
+#custom-ios {
+    margin: 0 3px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-weight: 700;
+    background: rgba(215, 221, 232, 0.10);
+}
+#custom-ios.good { color: #9ece6a; }
+#custom-ios.warn { color: #e0af68; background: rgba(224, 175, 104, 0.14); }
+#custom-ios.dead { color: #f7768e; background: rgba(247, 118, 142, 0.16); }
+
+/* ══════════════════════════════════════════════════════════════════
+   naly-cyber : identite visuelle complete de la barre.
+   Segments HUD chanfreines optiquement, filet neon superieur, grille
+   interne, accent utilise avec parcimonie. Aucun module retire.
+   ══════════════════════════════════════════════════════════════════ */
+
+@define-color cy-void   #04060b;
+@define-color cy-deep   #070c15;
+@define-color cy-panel  #0b1320;
+@define-color cy-grid   #16283a;
+@define-color cy-neon   #a3e635;
+@define-color cy-pink   #ff2e88;
+@define-color cy-amber  #ffb340;
+@define-color cy-text   #d8ecff;
+@define-color cy-muted  #56697f;
+
+@define-color main-bg   @cy-deep;
+@define-color main-fg   @cy-text;
+@define-color wb-act-bg @cy-neon;
+@define-color wb-act-fg @cy-void;
+@define-color wb-hvr-bg @cy-pink;
+@define-color wb-hvr-fg @cy-void;
+
+* {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+    font-size: 10px;
+    text-shadow: none;
+    box-shadow: none;
+}
+
+window#waybar {
+    background: transparent;
+}
+
+/* Segments HUD : filet neon en haut, socle sombre, ombre portee */
+#pill,
+.modules-left > widget > box,
+.modules-center > widget > box,
+.modules-right > widget > box {
+    background-image: linear-gradient(180deg,
+                      alpha(@cy-panel, 0.94) 0%,
+                      alpha(@cy-deep, 0.97) 100%);
+    border: 1px solid alpha(@cy-neon, 0.14);
+    border-top: 1px solid alpha(@cy-neon, 0.40);
+    border-radius: 3px;
+    box-shadow: 0 2px 12px alpha(@cy-void, 0.65),
+                inset 0 1px 0 alpha(#ffffff, 0.04);
+    margin: 2px 2px;
+    padding: 0 0px;
+    color: @cy-text;
+}
+
+/* Modules : sobres au repos, grille verticale entre eux */
+#clock, #cpu, #memory, #network, #battery, #backlight,
+#pulseaudio, #idle_inhibitor, #privacy, #tray,
+#custom-claude, #custom-king-voice, #custom-ios, #custom-dnd,
+#custom-power, #custom-updates, #custom-thermal, #custom-cpuinfo,
+#custom-gpuinfo, #custom-wallchange, #custom-theme, #custom-wbar,
+#custom-cliphist, #custom-keybindhint, #window {
+    color: @cy-muted;
+    padding: 0 7px;
+    margin: 3px 0;
+    transition: color 170ms ease,
+                background 170ms ease,
+                text-shadow 170ms ease;
+}
+
+/* Reperes de lecture : ce qui compte reste clair */
+#clock {
+    color: @cy-text;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    padding: 0 7px;
+}
+
+#window {
+    color: @cy-muted;
+    letter-spacing: 0.5px;
+}
+
+/* Espaces de travail : blocs HUD */
+#workspaces {
+    padding: 0 2px;
+    margin: 4px 0;
+}
+
+#workspaces button {
+    color: @cy-muted;
+    background: transparent;
+    padding: 0 5px;
+    margin: 2px 1px;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    transition: color 160ms ease,
+                background 160ms ease,
+                border-color 160ms ease,
+                box-shadow 160ms ease;
+}
+
+#workspaces button.active {
+    color: @cy-void;
+    background: @cy-neon;
+    border: 1px solid @cy-neon;
+    box-shadow: 0 0 10px alpha(@cy-neon, 0.55);
+}
+
+#workspaces button:hover {
+    color: @cy-void;
+    background: @cy-pink;
+    border: 1px solid @cy-pink;
+    box-shadow: 0 0 10px alpha(@cy-pink, 0.6);
+}
+
+/* Regle sacree de naly : tout ce qui se survole reagit */
+#clock:hover, #cpu:hover, #memory:hover, #network:hover, #battery:hover,
+#backlight:hover, #pulseaudio:hover, #idle_inhibitor:hover,
+#custom-claude:hover, #custom-king-voice:hover, #custom-ios:hover,
+#custom-dnd:hover, #custom-updates:hover, #custom-thermal:hover,
+#custom-cpuinfo:hover, #custom-gpuinfo:hover, #custom-wallchange:hover,
+#custom-theme:hover, #custom-wbar:hover, #custom-cliphist:hover,
+#custom-keybindhint:hover {
+    color: @cy-neon;
+    background: alpha(@cy-neon, 0.09);
+    text-shadow: 0 0 7px alpha(@cy-neon, 0.75);
+}
+
+#custom-power:hover {
+    color: @cy-pink;
+    background: alpha(@cy-pink, 0.11);
+    text-shadow: 0 0 8px alpha(@cy-pink, 0.85);
+}
+
+/* Etats critiques : l accent sert d alerte, pas de decoration */
+#battery.warning  { color: @cy-amber; }
+#battery.critical { color: @cy-pink; }
+#battery.charging { color: @cy-neon; }
+#pulseaudio.muted { color: @cy-muted; }
+
+tooltip {
+    background: alpha(@cy-deep, 0.98);
+    border: 1px solid alpha(@cy-neon, 0.35);
+    border-radius: 4px;
+    padding: 8px 12px;
+}
+
+tooltip label {
+    color: @cy-text;
+    font-family: "JetBrainsMono Nerd Font", monospace;
+}
+
+/* Anti-bug : couleur = etat reel de la machine, clic = diagnostic + correction */
+#custom-antibug.calme { color: @cy-muted; }
+#custom-antibug.tendu { color: @cy-amber; text-shadow: 0 0 6px alpha(@cy-amber, 0.6); }
+#custom-antibug.lag   { color: @cy-pink;  text-shadow: 0 0 9px alpha(@cy-pink, 0.9); }
+
+#custom-antibug:hover {
+    color: @cy-neon;
+    background: alpha(@cy-neon, 0.1);
+    text-shadow: 0 0 8px alpha(@cy-neon, 0.8);
+}
