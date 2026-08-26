@@ -12,6 +12,57 @@ LOCK_FILE="$STATE_DIR/toggle.lock"
 TARGET_FILE="$STATE_DIR/target-window"   # JSON hyprctl de la fenêtre où la dictée a commencé (adresse + classe + titre)
 KING_COMMAND_STATE="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila-command"
 KING_CHOICE_PID="$KING_COMMAND_STATE/choice.pid"
+LAST_PRESS_FILE="$STATE_DIR/last-press"
+RECORD_START_FILE="$STATE_DIR/record.start"
+SEND_FLAG="$STATE_DIR/send-requested"
+TRANSCRIBING_FLAG="$STATE_DIR/transcribing"
+DOUBLETAP_MS="${KING_DICTATE_DOUBLETAP_MS:-650}"
+SEND_FLAG_TTL="${KING_DICTATE_SEND_TTL:-180}"
+
+now_ms() { date +%s%3N; }
+
+send_requested() {
+  [[ -f "$SEND_FLAG" ]] || return 1
+  local age=$(( $(date +%s) - $(stat -c %Y "$SEND_FLAG" 2>/dev/null || echo 0) ))
+  (( age <= SEND_FLAG_TTL )) && return 0
+  rm -f "$SEND_FLAG"
+  return 1
+}
+
+consume_send() { rm -f "$SEND_FLAG"; }
+
+# --- DOUBLE APPUI = ENVOYER ------------------------------------------------
+# Un appui : demarre/arrete la dictee (le texte est TAPE, jamais envoye).
+# Deux appuis rapproches : envoie (Entree). Si le 1er appui du double vient de
+# lancer un enregistrement, on l'annule ; si une transcription tourne encore,
+# on pose un drapeau et l'envoi part des que le texte est tape.
+NOW_MS="$(now_ms)"
+LAST_MS="$(cat "$LAST_PRESS_FILE" 2>/dev/null || echo 0)"
+printf '%s\n' "$NOW_MS" > "$LAST_PRESS_FILE"
+
+if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
+  printf '0\n' > "$LAST_PRESS_FILE"
+  exec 9>"$LOCK_FILE"
+  flock -w 3 9 || true
+  if [[ -f "$PID_FILE" ]]; then
+    rpid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    rstart="$(cat "$RECORD_START_FILE" 2>/dev/null || echo 0)"
+    if [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && (( NOW_MS - rstart < DOUBLETAP_MS + 2500 )); then
+      kill -TERM "$rpid" 2>/dev/null || true
+      rm -f "$PID_FILE" "$AUDIO_FILE" "$TARGET_FILE" "$RECORD_START_FILE"
+    fi
+  fi
+  if [[ -f "$TRANSCRIBING_FLAG" ]]; then
+    : > "$SEND_FLAG"
+    "$HOME/.local/bin/king-voice-status" transcribing "ENVOI DÈS QUE C'EST TAPÉ" || true
+  else
+    sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
+    wtype -k Return 2>/dev/null || true
+    "$HOME/.local/bin/king-voice-status" done "ENVOYÉ" || true
+  fi
+  exit 0
+fi
+
 
 # --- VERROU anti-race : une seule instance de toggle à la fois ---------------
 # Sans ça, un double-appui ou un appui PENDANT la transcription part en vrille
@@ -54,6 +105,7 @@ start_recording() {
     pw-record --rate 16000 --channels 2 --format s16 "$AUDIO_FILE" >/dev/null 2>&1 9>&- &
   fi
   echo "$!" > "$PID_FILE"
+  now_ms > "$RECORD_START_FILE"
   restore_bluetooth_hifi 9>&- &  # async : ne touche que la sortie BT, pas le mic
 }
 
@@ -206,7 +258,8 @@ focus_lock() {
   return 0
 }
 
-trap focus_unlock EXIT INT TERM HUP
+cleanup_on_exit() { focus_unlock; rm -f "$TRANSCRIBING_FLAG"; }
+trap cleanup_on_exit EXIT INT TERM HUP
 
 window_exists() {
   hyprctl clients -j 2>/dev/null | jq -e --arg a "$1" 'any(.[]; .address == $a)' >/dev/null 2>&1
@@ -292,14 +345,16 @@ kitty_pty_of() {
 }
 
 kitty_deliver() {
-  local target="$1" text="$2" kpid pts sock
+  local target="$1" text="$2" kpid pts sock send_now=0
+  send_requested && send_now=1
+  [[ "${KING_DICTATE_AUTOSEND:-0}" == "1" ]] && send_now=1
   [[ "${KING_DICTATE_KITTY_BG:-1}" == "1" ]] || return 1
   kpid="$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$target" '.[] | select(.address == $a) | .pid // empty' 2>/dev/null || true)"
   [[ -n "$kpid" ]] || return 1
 
   pts="$(kitty_pty_of "$kpid")"
   if [[ -n "$pts" && -w "$pts" ]]; then
-    if KING_TEXT="$text" KING_PTS="$pts" python3 - <<'PY' 2>>"$STATE_DIR/dictate.log"
+    if KING_TEXT="$text" KING_PTS="$pts" KING_DICTATE_AUTOSEND="$send_now" python3 - <<'PY' 2>>"$STATE_DIR/dictate.log"
 import json, os, subprocess, time
 
 text = os.environ.get("KING_TEXT", "")
@@ -321,13 +376,14 @@ def dcs(data, bracketed=None):
 fd = os.open(os.environ["KING_PTS"], os.O_WRONLY | os.O_NOCTTY)
 try:
     os.write(fd, dcs(text, "auto"))
-    if os.environ.get("KING_DICTATE_AUTOSEND", "1") == "1":
+    if os.environ.get("KING_DICTATE_AUTOSEND", "0") == "1":
         time.sleep(float(os.environ.get("KING_DICTATE_SEND_DELAY", "0.15")))
         os.write(fd, dcs("\r"))
 finally:
     os.close(fd)
 PY
     then
+      (( send_now )) && consume_send
       dlog "livraison ARRIERE-PLAN via pty kitty ($pts) : aucun changement de focus"
       return 0
     fi
@@ -337,17 +393,22 @@ PY
   command -v kitty >/dev/null 2>&1 || return 1
   sock="unix:@kitty-$kpid"
   kitty @ --to "$sock" ls >/dev/null 2>&1 || return 1
-  if [[ "${KING_DICTATE_AUTOSEND:-1}" == "1" ]]; then
+  if (( send_now )); then
     printf '%s\n' "$text"
   else
     printf '%s' "$text"
   fi | kitty @ --to "$sock" send-text --stdin 2>>"$STATE_DIR/dictate.log" || return 1
+  (( send_now )) && consume_send
   dlog "livraison ARRIERE-PLAN via socket kitty ($sock) : aucun changement de focus"
   return 0
 }
 
 autosend() {
-  [[ "${KING_DICTATE_AUTOSEND:-1}" == "1" ]] || return 0
+  if send_requested; then
+    consume_send
+  else
+    [[ "${KING_DICTATE_AUTOSEND:-0}" == "1" ]] || return 0
+  fi
   sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
   wtype -k Return 2>>"$STATE_DIR/dictate.log" || dlog "envoi automatique (Return) a echoue"
 }
@@ -369,6 +430,7 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   rm -f "$PID_FILE"
   restore_bluetooth_hifi 9>&- &  # async : ne pas retarder la transcription
 
+  : > "$TRANSCRIBING_FLAG"
   notify "TRANSCRIBING..." "info"
   if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE" 2>>"$STATE_DIR/dictate.log")"; then
     notify "TRANSCRIPTION FAILED" "err"
