@@ -33,6 +33,45 @@ send_requested() {
 
 consume_send() { rm -f "$SEND_FLAG"; }
 
+kitty_pty_of() {
+  local kpid="$1" pts child
+  pts="$(ps --ppid "$kpid" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
+  if [[ -z "$pts" ]]; then
+    for child in $(ps --ppid "$kpid" -o pid= --no-headers 2>/dev/null); do
+      pts="$(ps --ppid "$child" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
+      [[ -n "$pts" ]] && break
+    done
+  fi
+  [[ -n "$pts" ]] && printf '/dev/%s' "$pts"
+  return 0
+}
+
+kitty_return_to() {
+  local target="$1" kpid pts
+  [[ -n "$target" ]] || return 1
+  kpid="$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$target" '.[] | select(.address == $a) | .pid // empty' 2>/dev/null || true)"
+  [[ -n "$kpid" ]] || return 1
+  pts="$(kitty_pty_of "$kpid")"
+  [[ -n "$pts" && -w "$pts" ]] || return 1
+  KING_PTS="$pts" python3 - 2>/dev/null <<'KITTYRET'
+import json, os, subprocess
+
+try:
+    raw = subprocess.run(["kitty", "--version"], capture_output=True, text=True, timeout=10).stdout
+    version = [int(x) for x in raw.split()[1].split(".")[:3]]
+except Exception:
+    version = [0, 48, 0]
+
+cmd = {"cmd": "send-text", "version": version, "no_response": True,
+       "payload": {"data": "text:\r"}}
+fd = os.open(os.environ["KING_PTS"], os.O_WRONLY | os.O_NOCTTY)
+try:
+    os.write(fd, b"\x1bP@kitty-cmd" + json.dumps(cmd).encode("ascii") + b"\x1b\\")
+finally:
+    os.close(fd)
+KITTYRET
+}
+
 # --- DOUBLE APPUI = ENVOYER ------------------------------------------------
 # Un appui : demarre/arrete la dictee (le texte est TAPE, jamais envoye).
 # Deux appuis en moins de 2,5 s : envoie (Entree). Si le 1er appui du double a
@@ -63,17 +102,12 @@ if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
   fi
   last_target="$(cat "$LAST_TARGET_FILE" 2>/dev/null || true)"
   here="$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null || true)"
-  if [[ -n "$last_target" && "$last_target" != "$here" ]] \
-     && hyprctl clients -j 2>/dev/null | jq -e --arg a "$last_target" 'any(.[]; .address == $a)' >/dev/null 2>&1; then
-    hyprctl dispatch focuswindow "address:$last_target" >/dev/null 2>&1 || true
-    for _ in {1..40}; do
-      [[ "$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty')" == "$last_target" ]] && break
-      sleep 0.05
-    done
-    sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
-    wtype -k Return 2>/dev/null || true
-    [[ -n "$here" ]] && hyprctl dispatch focuswindow "address:$here" >/dev/null 2>&1 || true
-    "$HOME/.local/bin/king-voice-status" done "ENVOYÉ (fenêtre de la dictée)" || true
+  if [[ -n "$last_target" && "$last_target" != "$here" ]]; then
+    if kitty_return_to "$last_target"; then
+      "$HOME/.local/bin/king-voice-status" done "ENVOYÉ (sans bouger de ta fenêtre)" || true
+    else
+      "$HOME/.local/bin/king-voice-status" error "PAS ENVOYÉ - reviens sur la fenêtre de la dictée" || true
+    fi
     exit 0
   fi
   sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
@@ -357,18 +391,6 @@ deliver_text() {
   return 0
 }
 
-kitty_pty_of() {
-  local kpid="$1" pts child
-  pts="$(ps --ppid "$kpid" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
-  if [[ -z "$pts" ]]; then
-    for child in $(ps --ppid "$kpid" -o pid= --no-headers 2>/dev/null); do
-      pts="$(ps --ppid "$child" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
-      [[ -n "$pts" ]] && break
-    done
-  fi
-  [[ -n "$pts" ]] && printf '/dev/%s' "$pts"
-  return 0
-}
 
 kitty_deliver() {
   local target="$1" text="$2" kpid pts sock send_now=0
@@ -504,6 +526,19 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
 
   if kitty_deliver "$target" "$text"; then
     notify "DONE - envoyé en arrière-plan, sans bouger de ta fenêtre" "ok"
+    exit 0
+  fi
+
+  # kabylesystem ne veut JAMAIS que la dictee lui arrache sa fenetre des yeux (effet
+  # "screamer"). Sur une cible non-terminal, Wayland exige pourtant le focus pour
+  # taper : plutot que de le voler, on met en file et le texte part tout seul a
+  # l'instant ou il revient dessus. Le terminal, lui, est servi par le pty
+  # au-dessus, donc instantanement et sans rien bouger.
+  if [[ "${KING_DICTATE_NEVER_STEAL_FOCUS:-1}" == "1" && "$(focused_address)" != "$target" ]]; then
+    dlog "cible non focalisee et vol de focus interdit -> mise en file"
+    : > "$PENDING_FLAG"
+    queue_for_window "$target" "$text" "$guard_title" </dev/null >/dev/null 2>&1 9>&- &
+    notify "EN ATTENTE - ça partira dès que tu reviens sur la fenêtre" "ok"
     exit 0
   fi
 
