@@ -16,7 +16,7 @@ LAST_PRESS_FILE="$STATE_DIR/last-press"
 RECORD_START_FILE="$STATE_DIR/record.start"
 SEND_FLAG="$STATE_DIR/send-requested"
 TRANSCRIBING_FLAG="$STATE_DIR/transcribing"
-DOUBLETAP_MS="${KING_DICTATE_DOUBLETAP_MS:-650}"
+DOUBLETAP_MS="${KING_DICTATE_DOUBLETAP_MS:-2500}"
 SEND_FLAG_TTL="${KING_DICTATE_SEND_TTL:-180}"
 
 now_ms() { date +%s%3N; }
@@ -33,7 +33,7 @@ consume_send() { rm -f "$SEND_FLAG"; }
 
 # --- DOUBLE APPUI = ENVOYER ------------------------------------------------
 # Un appui : demarre/arrete la dictee (le texte est TAPE, jamais envoye).
-# Deux appuis rapproches : envoie (Entree). Si le 1er appui du double vient de
+# Deux appuis en moins de 2,5 s : envoie (Entree). Si le 1er appui du double a
 # lancer un enregistrement, on l'annule ; si une transcription tourne encore,
 # on pose un drapeau et l'envoi part des que le texte est tape.
 NOW_MS="$(now_ms)"
@@ -47,7 +47,7 @@ if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
   if [[ -f "$PID_FILE" ]]; then
     rpid="$(cat "$PID_FILE" 2>/dev/null || true)"
     rstart="$(cat "$RECORD_START_FILE" 2>/dev/null || echo 0)"
-    if [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && (( NOW_MS - rstart < DOUBLETAP_MS + 2500 )); then
+    if [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && (( rstart >= LAST_MS - 200 )); then
       kill -TERM "$rpid" 2>/dev/null || true
       rm -f "$PID_FILE" "$AUDIO_FILE" "$TARGET_FILE" "$RECORD_START_FILE"
     fi
