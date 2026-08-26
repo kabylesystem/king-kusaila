@@ -89,6 +89,41 @@ transcribe() {
 
 raw="$(transcribe || true)"
 
+# ---- Filet anti-troncature ---------------------------------------------------
+# gpt-4o-transcribe GENERE la transcription token par token (contrairement a
+# whisper-1, modele ASR dedie) et s'arrete parfois avant la fin sur un audio un
+# peu long : les dernieres secondes dictees disparaissent, de facon aleatoire.
+# On mesure le debit obtenu (mots par seconde de PAROLE, pas de fichier) : en
+# francais un debit normal tourne autour de 2,5 mots/s, jamais sous 1. En
+# dessous du seuil, on rejoue avec whisper-1 et on garde la version la plus
+# complete des deux.
+retry_if_truncated() {
+  local text="$1" speech words rate
+  [[ -n "${text//[[:space:]]/}" ]] || { printf '%s' "$text"; return 0; }
+  [[ "$BACKEND" == "local" ]] && { printf '%s' "$text"; return 0; }
+  [[ -n "${OPENAI_API_KEY:-}" ]] || { printf '%s' "$text"; return 0; }
+  speech="$(jq -r '.speech_sec // empty' "$LOG" 2>/dev/null || true)"
+  [[ -n "$speech" ]] || { printf '%s' "$text"; return 0; }
+  words="$(printf '%s' "$text" | wc -w)"
+  rate="$(python3 -c "
+s=float('$speech'); w=int('$words')
+print('skip' if s < ${KING_TRUNC_MIN_SEC:-4} else round(w/s, 2))" 2>/dev/null || echo skip)"
+  [[ "$rate" == "skip" ]] && { printf '%s' "$text"; return 0; }
+  if python3 -c "import sys; sys.exit(0 if float('$rate') < ${KING_TRUNC_RATE:-1.0} else 1)"; then
+    local alt
+    alt="$(KING_OPENAI_TRANSCRIBE_MODEL=whisper-1 "$HOME/.local/bin/voice-transcribe-openai" "$audio" 2>/dev/null || true)"
+    if [[ $(printf '%s' "$alt" | wc -w) -gt "$words" ]]; then
+      echo "voice-transcribe: $OPENAI_MODEL tronque ($rate mot/s sur ${speech}s de parole) -> whisper-1 a repris la fin" >&2
+      note_backend "whisper-1 (reprise apres troncature de $OPENAI_MODEL)"
+      printf '%s' "$alt"
+      return 0
+    fi
+  fi
+  printf '%s' "$text"
+}
+
+raw="$(retry_if_truncated "$raw")"
+
 # ---- Gate langue: naly ne parle QUE français/anglais --------------------------
 # whisper.cpp (--language auto) et l'API OpenAI detectent parmi ~99 langues et
 # hallucinent parfois du texte dans une langue totalement etrangere (coreen,
