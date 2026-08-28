@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Ouvre le diagnostic intelligent et une vraie vue processus manipulable.
+set -uo pipefail
+
+mode="${1:-diagnose}"
+title="Anti-bug: Processes"
+window_class="naly-antibug"
+
+focus_process_view() {
+  local address
+  address="$(hyprctl clients -j 2>/dev/null \
+    | jq -r --arg class "$window_class" '.[] | select(.class == $class) | .address' \
+    | head -n 1)"
+  [[ -n "$address" ]] || return 1
+  hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1
+}
+
+open_process_view() {
+  if focus_process_view; then
+    return 0
+  fi
+  if ! command -v btop >/dev/null 2>&1; then
+    notify-send -a anti-bug -u critical "Anti-bug" "btop is not installed."
+    return 1
+  fi
+  setsid kitty --class "$window_class" --title "$title" \
+    -o confirm_os_window_close=0 \
+    -e btop --preset 1 --update 1000 >/dev/null 2>&1 &
+}
+
+start_diagnosis() {
+  systemd-run --user --collect --quiet \
+    --unit=naly-antibug-diagnose.service \
+    --property=Nice=10 \
+    --property=IOSchedulingClass=idle \
+    "$HOME/.local/bin/naly-antibug" >/dev/null 2>&1 || true
+}
+
+case "$mode" in
+  diagnose)
+    start_diagnosis
+    open_process_view
+    ;;
+  processes)
+    open_process_view
+    ;;
+  history)
+    setsid kitty --class naly-antibug-history --title "Anti-bug: Thermal history" \
+      -o confirm_os_window_close=0 \
+      -e sh -c '$HOME/.local/bin/pc-furie 12; printf "\nPress Enter to close"; read -r _' \
+      >/dev/null 2>&1 &
+    ;;
+  *)
+    printf 'usage: %s {diagnose|processes|history}\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac

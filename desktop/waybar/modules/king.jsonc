@@ -59,13 +59,14 @@
         "on-click-right": "kitty --hold --title 'King Kusaila' -e $HOME/.local/bin/king-kusaila-status",
         "tooltip": true
     },
-    "custom/antibug": {
+  "custom/antibug": {
     "exec": "$HOME/.local/bin/waybar-antibug.sh",
     "return-type": "json",
     "interval": 5,
     "tooltip": true,
-    "on-click": "$HOME/.local/bin/naly-antibug",
-    "on-click-right": "kitty --title antibug-history -e sh -c '$HOME/.local/bin/pc-furie 12; echo; read -p \"entree pour fermer\"'"
+    "on-click": "$HOME/.local/bin/naly-antibug-panel diagnose",
+    "on-click-right": "$HOME/.local/bin/naly-antibug-panel processes",
+    "on-click-middle": "$HOME/.local/bin/naly-antibug-panel history"
   },
 
   "custom/thermal": {

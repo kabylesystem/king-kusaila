@@ -1,5 +1,5 @@
-//   --// Layout Waybar canonique de naly : King Kusaila (REC + couronne répondeur) + bouton DND //--   //
-//   Les définitions des modules custom/claude, custom/king-voice, image#king, custom/dnd
+//   --// Layout Waybar canonique de naly : King Kusaila + boutons anti-bug et DND //--   //
+//   Les définitions des modules custom/claude, custom/king-voice, custom/antibug, image#king, custom/dnd
 //   vivent dans ~/.config/waybar/modules/king.jsonc (chargé via l'include "modules/*json*").
 {
     "layer": "top",

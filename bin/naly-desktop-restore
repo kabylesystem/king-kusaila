@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # naly-desktop-restore — réinjecte les customisations que HyDE écrase à chaque
 # changement de thème :
-#   1. modules Waybar King Kusaila (🔴 REC + 👑 couronne répondeur) + bouton DND
+#   1. modules Waybar King Kusaila + boutons anti-bug et DND
 #   2. glass dunst (notifs sombres translucides ~15 %, sans bordure)
 #
 # Idempotent : n'agit QUE si une custo manque réellement → pas de boucle infinie
@@ -46,8 +46,8 @@ reload_waybar() {
   fi
 }
 
-# ── 1. Waybar : King absent de la barre ? → réappliquer le layout canonique ──
-king_in_bar() {
+# ── 1. Waybar : un module durable manque ? → réappliquer le layout canonique ──
+durable_modules_in_bar() {
   python3 - "$1" <<'PY'
 import json, re, sys
 try:
@@ -58,7 +58,14 @@ try:
     cfg = json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))
 except Exception:
     sys.exit(1)
-wanted = {"custom/king-voice", "custom/claude", "custom/ios", "image#king"}
+wanted = {
+    "custom/antibug",
+    "custom/claude",
+    "custom/dnd",
+    "custom/ios",
+    "custom/king-voice",
+    "image#king",
+}
 placed = set()
 for key, val in cfg.items():
     if key.startswith("group/") and isinstance(val, dict):
@@ -69,10 +76,10 @@ sys.exit(0 if wanted <= placed else 1)
 PY
 }
 
-if [[ -f "$CFG" ]] && ! king_in_bar "$CFG"; then
+if [[ -f "$CFG" ]] && ! durable_modules_in_bar "$CFG"; then
   if [[ -f "$LAYOUT" ]]; then
     cp -f "$LAYOUT" "$CFG"
-    log "King + DND réinjectés dans config.jsonc"
+    log "modules King + anti-bug + DND réinjectés dans config.jsonc"
     reload_waybar
     did=1
   else

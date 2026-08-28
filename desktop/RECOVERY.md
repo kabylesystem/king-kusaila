@@ -7,7 +7,7 @@ Ce dossier + le watcher systemd les réappliquent **automatiquement**.
 
 | Custo | Fichier écrasé par HyDE | Source durable / réinjection |
 |---|---|---|
-| Modules Waybar King (🔴 REC + 👑 couronne répondeur) + bouton DND | `~/.config/waybar/config.jsonc` (régén selon le layout du thème) | `desktop/waybar/layouts/naly-top.jsonc` (layout canonique) + `desktop/waybar/modules/king.jsonc` (définitions, toujours incluses via `modules/*json*`) |
+| Modules Waybar King + boutons anti-bug et DND | `~/.config/waybar/config.jsonc` (régén selon le layout du thème) | `desktop/waybar/layouts/naly-top.jsonc` (layout canonique) + `desktop/waybar/modules/king.jsonc` (définitions, toujours incluses via `modules/*json*`) |
 | Glass des notifs dunst (sombre, translucide ~15 %, sans bordure) | `~/.cache/hyde/wallbash/dunst.conf` (couleurs du thème, **volatile**) | bloc `naly-glass` réécrit par le script de restauration |
 
 ## Ce qui survit déjà tout seul (ne pas toucher)
@@ -19,11 +19,11 @@ Ce dossier + le watcher systemd les réappliquent **automatiquement**.
 
 ## Le mécanisme de persistance
 
-- `bin/naly-desktop-restore` — script idempotent : si King manque de la barre → réapplique `naly-top.jsonc` + restart waybar ; si le marqueur `naly-glass` manque du cache → réécrit le glass + régénère `dunstrc` + `dunstctl reload`. N'écrit que si nécessaire (pas de boucle avec le watcher).
+- `bin/naly-desktop-restore` : script idempotent. Si King, anti-bug ou DND manque de la barre, il réapplique `naly-top.jsonc` et redémarre Waybar. Si le marqueur `naly-glass` manque du cache, il réécrit le glass, régénère `dunstrc`, puis recharge dunst. N'écrit que si nécessaire.
 - `desktop/systemd/naly-desktop-restore.path` — watcher : surveille `config.jsonc` et le cache glass dunst. Dès que HyDE les régénère (= switch de thème), il lance le service.
 - `desktop/systemd/naly-desktop-restore.service` — oneshot : `sleep 2` (laisse HyDE finir) puis lance le script.
 
-Résultat : **peu importe le thème HyDE choisi, King + DND + glass reviennent tout seuls en ~3 s.**
+Résultat : **peu importe le thème HyDE choisi, King + anti-bug + DND + glass reviennent tout seuls en ~3 s.**
 
 ## Installer sur une machine neuve
 

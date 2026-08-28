@@ -39,6 +39,6 @@ if [ -f "$report" ]; then
   [ -n "$body" ] && last="\\n\\n<b>Dernier passage</b>\\n${body}"
 fi
 
-tooltip="<b>Anti-bug · ${state}</b>\n${temp}°C · charge ${load} (${load_pct}%)\nCPU bloqué ${cpu_psi}% · disque bloqué ${io_psi}%\n\n CLIC GAUCHE → diagnostiquer et corriger\n CLIC DROIT  → historique thermique${last}"
+tooltip="<b>Anti-bug · ${state}</b>\n${temp}°C · charge ${load} (${load_pct}%)\nCPU bloqué ${cpu_psi}% · disque bloqué ${io_psi}%\n\n LEFT CLICK   → diagnose + processes\n RIGHT CLICK  → processes\n MIDDLE CLICK → thermal history${last}"
 
 printf '{"text":"%s","class":"%s","tooltip":"%s"}\n' "$icon" "$cls" "$tooltip"
