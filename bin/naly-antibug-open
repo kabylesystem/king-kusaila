@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Affiche toujours le panneau anti-bug sur le workspace courant.
+set -uo pipefail
+
+panel_class="com.kabylesystem.NalyAntibug"
+panel_address="$(hyprctl clients -j 2>/dev/null \
+  | jq -r --arg class "$panel_class" '.[] | select(.class == $class) | .address' \
+  | head -n 1)"
+
+if [[ -n "$panel_address" ]]; then
+  current_workspace="$(hyprctl activeworkspace -j 2>/dev/null | jq -r '.id')"
+  hyprctl dispatch movetoworkspace "$current_workspace,address:$panel_address" >/dev/null 2>&1
+  hyprctl dispatch focuswindow "address:$panel_address" >/dev/null 2>&1
+  exit 0
+fi
+
+setsid "$HOME/.local/bin/naly-antibug-panel" >/dev/null 2>&1 &

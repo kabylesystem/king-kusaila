@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
 import glob
+import fcntl
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "naly-antibug")
 REPORT = os.path.join(STATE, "last.txt")
+JSON_REPORT = os.path.join(STATE, "last.json")
+PANEL_MODE = "--panel" in sys.argv
 PROFILE_BIN = "/usr/local/bin/naly-thermal-profile"
 RECORDER = "/var/lib/thermal-recorder/history.jsonl"
 HZ = os.sysconf("SC_CLK_TCK")
 NEVER = re.compile(
-    r"Hyprland|waybar|pipewire|wireplumber|quickshell|systemd|dbus|kitty|claude|"
+    r"Hyprland|waybar|pipewire|wireplumber|quickshell|systemd|dbus|kitty|claude|codex|"
     r"sway|hypr|Xwayland|gnome-keyring|polkit|udev|thermal-recorder"
 )
 
 os.makedirs(STATE, exist_ok=True)
+SCAN_LOCK = open(os.path.join(STATE, "scan.lock"), "w", encoding="utf-8")
+try:
+    lock_mode = fcntl.LOCK_EX if PANEL_MODE else fcntl.LOCK_EX | fcntl.LOCK_NB
+    fcntl.flock(SCAN_LOCK, lock_mode)
+except BlockingIOError:
+    raise SystemExit(0)
 
 
 def run(cmd, timeout=6):
@@ -112,6 +122,8 @@ def audio_playing():
 
 
 uptime = float(open("/proc/uptime").read().split()[0])
+initial_temp = temp()
+hot_process_threshold = 20 if initial_temp >= 90 else 40
 snap1 = procs()
 time.sleep(2.5)
 snap2 = procs()
@@ -123,7 +135,7 @@ for pid, b in snap2.items():
         continue
     pct = (b["cpu"] - a["cpu"]) / 2.5 * 100
     cmd = cmdline(pid)
-    if cmd and pct > 40 and not NEVER.search(b["name"]):
+    if cmd and pct > hot_process_threshold and not NEVER.search(b["name"]):
         live.append((pct, pid, b["name"], cmd))
 live.sort(reverse=True)
 
@@ -159,7 +171,7 @@ stale = {k: v for k, v in dupes.items()
 
 zombies = sum(1 for b in snap2.values() if b["state"] == "Z")
 
-t0, w, r0 = temp(), watts(), rpm()
+t0, w, r0 = initial_temp or temp(), watts(), rpm()
 load = os.getloadavg()[0]
 cpu_psi, io_psi = psi("/proc/pressure/cpu", "some"), psi("/proc/pressure/io", "full")
 profile = run([PROFILE_BIN, "get"]).strip() or "?"
@@ -191,16 +203,24 @@ for script, entries in dupes.items():
 
 if stale and offer is None:
     script, entries = max(stale.items(), key=lambda kv: len(kv[1]))
-    offer = ("sweep", ",".join(pid for pid, _ in entries), script,
-             "%d copies empilées depuis des heures, plus personne ne les attend"
-             % len(entries))
+    # Keep the youngest copy: a duplicate cleanup must never delete the current
+    # instance together with the stale ones.
+    oldest_entries = sorted(entries, key=lambda item: item[1], reverse=True)[:-1]
+    offer = ("sweep", ",".join(pid for pid, _ in oldest_entries), script,
+             "%d anciennes copies empilées depuis des heures"
+             % len(oldest_entries))
 
 if zombies >= 2:
     found.append("%d process zombies (un parent ne récupère pas ses enfants)" % zombies)
 
-if profile == "perf" and t0 >= 88:
+if t0 >= 90 and profile != "silencieux":
+    if subprocess.run(["sudo", "-n", PROFILE_BIN, "silencieux"], capture_output=True).returncode == 0:
+        fixed.append("profil thermique → Silencieux")
+        profile = "silencieux"
+elif profile == "perf" and t0 >= 82:
     if subprocess.run(["sudo", "-n", PROFILE_BIN, "equilibre"], capture_output=True).returncode == 0:
         fixed.append("profil Perf → Équilibré")
+        profile = "equilibre"
 
 crash = run(["journalctl", "--user", "-b", "0", "--since", "-5 min", "--no-pager"])
 c = re.findall(r"(\S+\.service): Scheduled restart", crash)
@@ -244,6 +264,39 @@ if not fixed and not found:
     body += ("Aucun coupable. La chaleur vient des rafales du CPU, pas d un bug.\n"
              if t1 >= 88 else "Rien d anormal, la machine est saine.\n")
 body += "\n%d°C · %s W · %d RPM · charge %.1f · CPU bloqué %.0f%%" % (t1, w, r1, load, cpu_psi)
+
+panel_offer = None
+if offer:
+    kind, pid, name, why = offer
+    panel_offer = {
+        "kind": kind,
+        "pids": [int(one) for one in pid.split(",")],
+        "name": name,
+        "why": why,
+    }
+
+panel_report = {
+    "timestamp": time.time(),
+    "found": found,
+    "fixed": fixed,
+    "offer": panel_offer,
+    "metrics": {
+        "temperature": t1,
+        "watts": w,
+        "rpm": r1,
+        "load": load,
+        "cpu_pressure": cpu_psi,
+        "io_pressure": io_psi,
+        "profile": profile,
+    },
+}
+tmp_report = JSON_REPORT + ".tmp"
+with open(tmp_report, "w", encoding="utf-8") as f:
+    json.dump(panel_report, f, ensure_ascii=False)
+os.replace(tmp_report, JSON_REPORT)
+
+if PANEL_MODE:
+    raise SystemExit(0)
 
 if offer:
     kind, pid, name, why = offer

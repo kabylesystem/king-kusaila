@@ -25,6 +25,22 @@ score=0
 [ "$temp" -ge 96 ] && score=2
 [ "$load_pct" -ge 55 ] && score=$(( score > 1 ? score : 1 ))
 
+# Mode proactif : à partir de 92°C ou d'un état critique, lancer le correcteur
+# sans attendre un clic. Cooldown de 3 min pour ne pas transformer le remède en charge.
+antibug_state="${XDG_RUNTIME_DIR:-/tmp}/naly-antibug"
+antibug_stamp="$antibug_state/auto.last"
+antibug_now=$(date +%s)
+antibug_last=$(stat -c %Y "$antibug_stamp" 2>/dev/null || echo 0)
+if { [ "$temp" -ge 92 ] || [ "$score" -ge 2 ]; } && [ $((antibug_now - antibug_last)) -ge 180 ]; then
+  mkdir -p "$antibug_state"
+  touch "$antibug_stamp"
+  systemd-run --user --collect --quiet \
+    --unit=naly-antibug-auto.service \
+    --property=Nice=10 \
+    --property=IOSchedulingClass=idle \
+    "$HOME/.local/bin/naly-antibug" --panel >/dev/null 2>&1 || true
+fi
+
 bug=$(printf '\uf188')
 case "$score" in
   2) icon="$bug FIX"; cls="lag"; state="ÇA LAG" ;;
@@ -39,6 +55,6 @@ if [ -f "$report" ]; then
   [ -n "$body" ] && last="\\n\\n<b>Dernier passage</b>\\n${body}"
 fi
 
-tooltip="<b>Anti-bug · ${state}</b>\n${temp}°C · charge ${load} (${load_pct}%)\nCPU bloqué ${cpu_psi}% · disque bloqué ${io_psi}%\n\n LEFT CLICK   → diagnose + processes\n RIGHT CLICK  → processes\n MIDDLE CLICK → thermal history${last}"
+tooltip="<b>Anti-bug · ${state}</b>\n${temp}°C · charge ${load} (${load_pct}%)\nCPU bloqué ${cpu_psi}% · disque bloqué ${io_psi}%\n\n LEFT / RIGHT CLICK → open action panel\n MIDDLE CLICK       → thermal history${last}"
 
 printf '{"text":"%s","class":"%s","tooltip":"%s"}\n' "$icon" "$cls" "$tooltip"

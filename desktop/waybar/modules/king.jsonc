@@ -64,9 +64,9 @@
     "return-type": "json",
     "interval": 5,
     "tooltip": true,
-    "on-click": "$HOME/.local/bin/naly-antibug-panel diagnose",
-    "on-click-right": "$HOME/.local/bin/naly-antibug-panel processes",
-    "on-click-middle": "$HOME/.local/bin/naly-antibug-panel history"
+    "on-click": "$HOME/.local/bin/naly-antibug-open",
+    "on-click-right": "$HOME/.local/bin/naly-antibug-open",
+    "on-click-middle": "$HOME/.local/bin/naly-antibug-panel --history"
   },
 
   "custom/thermal": {
