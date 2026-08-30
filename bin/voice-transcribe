@@ -73,6 +73,20 @@ transcribe() {
     "$HOME/.local/bin/voice-transcribe-local" "$audio"
     return
   fi
+  # Crédits épuisés connus : inutile de perdre 4 s a interroger une API morte a
+  # chaque dictee. On retente quand meme toutes les heures, au cas ou il aurait
+  # recharge entre-temps.
+  local credit_stamp="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila/no-credits"
+  if [[ -f "$credit_stamp" ]]; then
+    local age=$(( $(date +%s) - $(stat -c %Y "$credit_stamp" 2>/dev/null || echo 0) ))
+    if (( age < 3600 )); then
+      note_backend "whisper local (credits OpenAI epuises il y a $((age / 60)) min)"
+      "$HOME/.local/bin/voice-transcribe-local" "$audio"
+      return
+    fi
+    rm -f "$credit_stamp"
+  fi
+
   local text err
   err="$(mktemp)"
   if text="$("$HOME/.local/bin/voice-transcribe-openai" "$audio" 2>"$err")" && [[ -n "${text//[[:space:]]/}" ]]; then
@@ -81,8 +95,27 @@ transcribe() {
     printf '%s\n' "$text"
     return
   fi
-  echo "voice-transcribe: $OPENAI_MODEL a echoue -> repli whisper local. Cause: $(tr '\n' ' ' < "$err")" >&2
-  note_backend "whisper local (repli, $OPENAI_MODEL a echoue: $(tr '\n' ' ' < "$err" | cut -c1-200))"
+  cause="$(tr '\n' ' ' < "$err")"
+  echo "voice-transcribe: $OPENAI_MODEL a echoue -> repli whisper local. Cause: $cause" >&2
+  note_backend "whisper local (repli, $OPENAI_MODEL a echoue: $(cut -c1-200 <<<"$cause"))"
+  # Un repli SILENCIEUX est un piege : la dictee continue de marcher, en moins bien,
+  # sans que kabylesystem sache pourquoi. Le cas des credits epuises est signale une
+  # fois par heure pour ne pas devenir du bruit.
+  if [[ "$cause" == *"credit_balance_exhausted"* || "$cause" == *"HTTP 429"* ]]; then
+    stamp="${XDG_RUNTIME_DIR:-/tmp}/king-kusaila/last-credit-warning"
+    mkdir -p "$(dirname "$stamp")" 2>/dev/null || true
+    now="$(date +%s)"
+    last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    mkdir -p "$(dirname "$credit_stamp")" 2>/dev/null || true
+    : > "$credit_stamp"
+    if (( now - last > 3600 )); then
+      printf '%s\n' "$now" > "$stamp" 2>/dev/null || true
+      notify-send -a "dictee" -u critical -t 15000 \
+        "Dictée : crédits OpenAI épuisés" \
+        "La transcription tourne sur whisper local (plus lent, un peu moins précis).\nRecharge sur platform.openai.com pour retrouver gpt-4o-transcribe." \
+        2>/dev/null || true
+    fi
+  fi
   rm -f "$err"
   "$HOME/.local/bin/voice-transcribe-local" "$audio"
 }
