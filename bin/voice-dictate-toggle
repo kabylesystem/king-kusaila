@@ -127,20 +127,9 @@ fi
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
-# Le micro INTERNE d'abord, toujours. Il est seul sur le bus PCI (HDA Intel) ;
-# tout ce qui est externe arrive en usb- ou bluez_. C'est lui qui est calibre
-# (gain, seuils de tri, canal propre) : brancher des EarPods ne doit pas changer
-# de micro en douce, sinon la transcription se degrade sans raison visible.
 record_source() {
   if [[ -n "${KING_RECORD_SOURCE:-}" ]]; then
     printf '%s\n' "$KING_RECORD_SOURCE"
-    return
-  fi
-  local internal
-  internal="$(pactl list sources short 2>/dev/null |
-    awk '$2 ~ /^alsa_input\.pci-/ && $2 !~ /\.monitor$/ { print $2; exit }')"
-  if [[ -n "$internal" ]]; then
-    printf '%s\n' "$internal"
     return
   fi
   pactl list sources short 2>/dev/null |
@@ -151,21 +140,8 @@ restore_bluetooth_hifi() {
   "$HOME/.local/bin/sony-audio-fix" >/dev/null 2>&1 || true
 }
 
-# La carte a regler est celle qui EXPOSE le micro interne, pas l'index 0 : brancher
-# un casque USB ajoute une carte et l'index n'est plus une hypothese sure.
-mic_card() {
-  local c
-  for c in $(awk '/^ *[0-9]+ \[/ {gsub(/[^0-9]/, "", $1); print $1}' /proc/asound/cards 2>/dev/null); do
-    if amixer -c "$c" scontrols 2>/dev/null | grep -q "Internal Mic"; then
-      printf '%s' "$c"
-      return 0
-    fi
-  done
-  printf '0'
-}
-
 mic_gain_sane() {
-  local card="${KING_MIC_CARD:-$(mic_card)}"
+  local card="${KING_MIC_CARD:-0}"
   amixer -c "$card" -q sset "Internal Mic Boost" "${KING_MIC_BOOST:-0}" 2>/dev/null || true
   amixer -c "$card" -q sset Capture "${KING_MIC_CAPTURE:-88%}" 2>/dev/null || true
 }

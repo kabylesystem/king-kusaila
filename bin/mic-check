@@ -12,8 +12,7 @@ if command -v framework_tool >/dev/null 2>&1; then
 fi
 
 SINK="$(pactl list sinks short | awk '$2 ~ /^alsa_output\./ {print $2; exit}')"
-SRC="$(pactl list sources short | awk '$2 ~ /^alsa_input\.pci-/ && $2 !~ /\.monitor$/ {print $2; exit}')"
-[[ -z "$SRC" ]] && SRC="$(pactl list sources short | awk '$2 ~ /^alsa_input\./ && $2 !~ /\.monitor$/ {print $2; exit}')"
+SRC="$(pactl list sources short | awk '$2 ~ /^alsa_input\./ {print $2; exit}')"
 [[ -z "$SRC" ]] && { echo "VERDICT: aucune source micro dans PipeWire (essaie: systemctl --user restart wireplumber)"; exit 1; }
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT

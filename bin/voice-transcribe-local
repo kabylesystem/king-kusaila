@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# large-v3-turbo quantifie q5_0 : mesure le 2026-08-29 sur une dictee de 29 s,
-# 8,6 s contre 6,9 s pour base et 12,9 s pour small. Le turbo a moins de couches
-# de decodage, il bat donc small en vitesse ET en qualite. 1,7 s de plus que base
-# pour passer du pire au meilleur modele : le repli local vaut enfin l API.
-MODEL="${KING_WHISPER_MODEL:-$HOME/.local/share/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin}"
-if [[ ! -f "$MODEL" ]]; then
-  MODEL="$HOME/.local/share/whisper.cpp/models/ggml-base.bin"
-fi
+MODEL="${KING_WHISPER_MODEL:-$HOME/.local/share/whisper.cpp/models/ggml-base.bin}"
 
 if [[ $# -lt 1 ]]; then
   echo "usage: voice-transcribe <audio.wav>" >&2
