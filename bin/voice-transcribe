@@ -59,6 +59,10 @@ audio="$asr_input"
 
 # ---- Backends ----------------------------------------------------------------
 BACKEND_FILE="${original_audio%.*}.backend"
+# Efface l ancienne valeur des le depart : un .backend perime fait croire que la
+# dictee tourne sur un moteur qu elle n a pas utilise (quand l audio est juge
+# silencieux, on sort avant d appeler quoi que ce soit). Piege vecu au diagnostic.
+rm -f "$BACKEND_FILE" 2>/dev/null || true
 note_backend() { printf '%s\n' "$1" > "$BACKEND_FILE" 2>/dev/null || true; }
 
 transcribe() {
