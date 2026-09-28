@@ -108,23 +108,8 @@ NOW_MS="$(now_ms)"
 LAST_MS="$(cat "$LAST_PRESS_FILE" 2>/dev/null || echo 0)"
 printf '%s\n' "$NOW_MS" > "$LAST_PRESS_FILE"
 
-if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
-  printf '0\n' > "$LAST_PRESS_FILE"
-  exec 9>"$LOCK_FILE"
-  flock -w 3 9 || true
-  if [[ -f "$PID_FILE" ]]; then
-    rpid="$(cat "$PID_FILE" 2>/dev/null || true)"
-    rstart="$(cat "$RECORD_START_FILE" 2>/dev/null || echo 0)"
-    if [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && (( rstart >= LAST_MS - 200 )); then
-      kill -TERM "$rpid" 2>/dev/null || true
-      rm -f "$PID_FILE" "$AUDIO_FILE" "$TARGET_FILE" "$RECORD_START_FILE"
-    fi
-  fi
-  if [[ -f "$TRANSCRIBING_FLAG" || -f "$PENDING_FLAG" ]]; then
-    : > "$SEND_FLAG"
-    "$HOME/.local/bin/king-voice-status" transcribing "ENVOI DÈS QUE C'EST TAPÉ" || true
-    exit 0
-  fi
+send_previous() {
+  local last_target here
   last_target="$(cat "$LAST_TARGET_FILE" 2>/dev/null || true)"
   here="$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null || true)"
   if [[ -n "$last_target" && "$last_target" != "$here" ]]; then
@@ -133,13 +118,38 @@ if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
     else
       "$HOME/.local/bin/king-voice-status" error "PAS ENVOYÉ - reviens sur la fenêtre de la dictée" || true
     fi
-    exit 0
+    return 0
   fi
   sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
   wtype -k Return 2>/dev/null || true
   "$HOME/.local/bin/king-voice-status" done "ENVOYÉ" || true
+}
+
+DOUBLETAP_STOP=0
+if (( NOW_MS - LAST_MS < DOUBLETAP_MS )); then
+  printf '0\n' > "$LAST_PRESS_FILE"
+  exec 9>"$LOCK_FILE"
+  flock -w 3 9 || true
+  if [[ -f "$PID_FILE" ]]; then
+    rpid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    rstart="$(cat "$RECORD_START_FILE" 2>/dev/null || echo 0)"
+    if [[ -n "$rpid" ]] && kill -0 "$rpid" 2>/dev/null && (( rstart >= LAST_MS - 200 )); then
+      DOUBLETAP_STOP=1
+    fi
+  fi
+fi
+
+if (( DOUBLETAP_STOP == 0 && NOW_MS - LAST_MS < DOUBLETAP_MS )); then
+  if [[ -f "$TRANSCRIBING_FLAG" || -f "$PENDING_FLAG" ]]; then
+    : > "$SEND_FLAG"
+    "$HOME/.local/bin/king-voice-status" transcribing "ENVOI DÈS QUE C'EST TAPÉ" || true
+    exit 0
+  fi
+  send_previous
   exit 0
 fi
+
+(( DOUBLETAP_STOP == 1 )) && : > "$SEND_FLAG"
 
 
 # --- VERROU anti-race : une seule instance de toggle à la fois ---------------
@@ -507,11 +517,17 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   OWNS_TRANSCRIBING=1
   notify "TRANSCRIBING..." "info"
   if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE" 2>>"$STATE_DIR/dictate.log")"; then
+    (( DOUBLETAP_STOP == 1 )) && consume_send
     notify "TRANSCRIPTION FAILED" "err"
     exit 1
   fi
 
   if [[ -z "${text//[[:space:]]/}" ]]; then
+    if (( DOUBLETAP_STOP == 1 )); then
+      consume_send
+      send_previous
+      exit 0
+    fi
     reason="$(jq -r '"\(.verdict) · pic \(.peak_db)dB · SNR \(.snr_db)dB"' "$STATE_DIR/input.prep.json" 2>/dev/null || true)"
     case "$reason" in
       clipped*) notify "MICRO SATURÉ - $reason" "err" ;;
