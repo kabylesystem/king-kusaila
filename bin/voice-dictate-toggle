@@ -33,8 +33,33 @@ send_requested() {
 
 consume_send() { rm -f "$SEND_FLAG"; }
 
+kitty_focused_pty() {
+  local kpid="$1" wpid
+  wpid="$(timeout 2 kitty @ --to "unix:@kitty-$kpid" ls 2>/dev/null | jq -r '
+    [.[] | select(.is_focused or .is_active)][0].tabs
+    | [.[] | select(.is_focused or .is_active)][0].windows
+    | [.[] | select(.is_focused or .is_active)][0].pid // empty' 2>/dev/null || true)"
+  [[ -n "$wpid" ]] || return 0
+  readlink "/proc/$wpid/fd/0" 2>/dev/null | grep -m1 '^/dev/pts/' || true
+}
+
+remember_kitty_tab() {
+  local kpid pts
+  kpid="$(jq -r 'select(.class == "kitty") | .pid // empty' "$TARGET_FILE" 2>/dev/null || true)"
+  [[ -n "$kpid" ]] || return 0
+  pts="$(kitty_focused_pty "$kpid")"
+  [[ -n "$pts" ]] && printf '%s\n' "$pts" > "$STATE_DIR/kitty-pty-$kpid"
+  return 0
+}
+
 kitty_pty_of() {
   local kpid="$1" pts child
+  pts="$(cat "$STATE_DIR/kitty-pty-$kpid" 2>/dev/null || true)"
+  if [[ -n "$pts" && -w "$pts" ]]; then
+    printf '%s' "$pts"
+    return 0
+  fi
+  pts=""
   pts="$(ps --ppid "$kpid" -o tty= --no-headers 2>/dev/null | tr -d ' ' | grep -m1 '^pts/' || true)"
   if [[ -z "$pts" ]]; then
     for child in $(ps --ppid "$kpid" -o pid= --no-headers 2>/dev/null); do
@@ -571,5 +596,6 @@ start_recording                                  # capturer le son AVANT le rest
 # Mémoriser OÙ la dictée commence (fenêtre + classe + titre) : c'est LÀ que le
 # texte sera tapé au stop, même si naly est parti ailleurs entre-temps.
 hyprctl activewindow -j 2>/dev/null > "$TARGET_FILE" || true
+remember_kitty_tab
 notify "REC - press Super+C again to stop" "rec" # feedback ensuite (latence minimale)
 exit 0
