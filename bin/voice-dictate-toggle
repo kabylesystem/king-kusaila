@@ -149,7 +149,6 @@ if (( DOUBLETAP_STOP == 0 && NOW_MS - LAST_MS < DOUBLETAP_MS )); then
   exit 0
 fi
 
-(( DOUBLETAP_STOP == 1 )) && : > "$SEND_FLAG"
 
 
 # --- VERROU anti-race : une seule instance de toggle à la fois ---------------
@@ -517,14 +516,12 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   OWNS_TRANSCRIBING=1
   notify "TRANSCRIBING..." "info"
   if ! text="$("$HOME/.local/bin/voice-transcribe" "$AUDIO_FILE" 2>>"$STATE_DIR/dictate.log")"; then
-    (( DOUBLETAP_STOP == 1 )) && consume_send
     notify "TRANSCRIPTION FAILED" "err"
     exit 1
   fi
 
   if [[ -z "${text//[[:space:]]/}" ]]; then
     if (( DOUBLETAP_STOP == 1 )); then
-      consume_send
       send_previous
       exit 0
     fi
