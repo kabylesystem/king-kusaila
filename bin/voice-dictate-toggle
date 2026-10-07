@@ -33,9 +33,66 @@ send_requested() {
 
 consume_send() { rm -f "$SEND_FLAG"; }
 
+kitty_socket_of() {
+  python3 - "$1" <<'PYKITTY'
+import sys
+from pathlib import Path
+
+proc = Path('/proc') / sys.argv[1]
+try:
+    if (proc / 'comm').read_text().strip() != 'kitty':
+        raise SystemExit(1)
+    args = (proc / 'cmdline').read_bytes().decode().split('\0')
+except OSError:
+    raise SystemExit(1)
+for i, arg in enumerate(args):
+    if arg == '--listen-on' and i + 1 < len(args):
+        print(args[i + 1])
+        break
+    if arg.startswith('--listen-on='):
+        print(arg.split('=', 1)[1])
+        break
+else:
+    print('unix:@kitty-' + sys.argv[1])
+PYKITTY
+}
+
+kitty_pty_allowed() {
+  ! tr '\0' '\n' < "/proc/$1/cmdline" | grep -q 'allow_remote_control=socket-only'
+}
+
+kitty_socket_send() {
+  local kpid="$1" pts="$2" text="$3" send_now="${4:-0}" paste="${5:-auto}" sock listing wid
+  sock="$(kitty_socket_of "$kpid")" || return 1
+  listing="$(timeout 2 kitty @ --to "$sock" ls 2>/dev/null)" || return 1
+  wid="$(printf '%s' "$listing" | python3 -c '
+import json, os, sys
+
+matches = []
+for os_window in json.load(sys.stdin):
+    for tab in os_window.get("tabs", []):
+        for window in tab.get("windows", []):
+            try:
+                pty = os.readlink("/proc/" + str(window["pid"]) + "/fd/0")
+            except OSError:
+                continue
+            if pty == sys.argv[1]:
+                matches.append(window["id"])
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+' "$pts")" || return 1
+  printf '%s' "$text" | timeout 3 kitty @ --to "$sock" send-text --match "id:$wid" --bracketed-paste "$paste" --stdin 2>>"$STATE_DIR/dictate.log" || return 1
+  if (( send_now )); then
+    sleep "${KING_DICTATE_SEND_DELAY:-0.15}"
+    printf '\r' | timeout 3 kitty @ --to "$sock" send-text --match "id:$wid" --bracketed-paste disable --stdin 2>>"$STATE_DIR/dictate.log" || return 1
+  fi
+}
+
 kitty_focused_pty() {
-  local kpid="$1" wpid
-  wpid="$(timeout 2 kitty @ --to "unix:@kitty-$kpid" ls 2>/dev/null | jq -r '
+  local kpid="$1" wpid sock
+  sock="$(kitty_socket_of "$kpid")" || return 0
+  wpid="$(timeout 2 kitty @ --to "$sock" ls 2>/dev/null | jq -r '
     [.[] | select(.is_focused or .is_active)][0].tabs
     | [.[] | select(.is_focused or .is_active)][0].windows
     | [.[] | select(.is_focused or .is_active)][0].pid // empty' 2>/dev/null || true)"
@@ -45,7 +102,7 @@ kitty_focused_pty() {
 
 remember_kitty_tab() {
   local kpid pts
-  kpid="$(jq -r 'select(.class == "kitty") | .pid // empty' "$TARGET_FILE" 2>/dev/null || true)"
+  kpid="$(jq -r '.pid // empty' "$TARGET_FILE" 2>/dev/null || true)"
   [[ -n "$kpid" ]] || return 0
   pts="$(kitty_focused_pty "$kpid")"
   [[ -n "$pts" ]] && printf '%s\n' "$pts" > "$STATE_DIR/kitty-pty-$kpid"
@@ -78,6 +135,10 @@ kitty_return_to() {
   [[ -n "$kpid" ]] || return 1
   pts="$(kitty_pty_of "$kpid")"
   [[ -n "$pts" && -w "$pts" ]] || return 1
+  if kitty_socket_send "$kpid" "$pts" $'\r' 0 disable; then
+    return 0
+  fi
+  kitty_pty_allowed "$kpid" || return 1
   KING_PTS="$pts" python3 - 2>/dev/null <<'KITTYRET'
 import json, os, subprocess
 
@@ -435,6 +496,12 @@ kitty_deliver() {
   [[ -n "$kpid" ]] || return 1
 
   pts="$(kitty_pty_of "$kpid")"
+  if [[ -n "$pts" ]] && kitty_socket_send "$kpid" "$pts" "$text" "$send_now"; then
+    (( send_now )) && consume_send
+    dlog "livraison ARRIERE-PLAN via socket kitty avec cible pty ($pts) : aucun changement de focus"
+    return 0
+  fi
+  kitty_pty_allowed "$kpid" || return 1
   if [[ -n "$pts" && -w "$pts" ]]; then
     if KING_TEXT="$text" KING_PTS="$pts" KING_DICTATE_AUTOSEND="$send_now" python3 - <<'PY' 2>>"$STATE_DIR/dictate.log"
 import json, os, subprocess, time
